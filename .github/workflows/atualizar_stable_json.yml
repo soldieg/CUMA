@@ -1,0 +1,66 @@
+name: Atualizar manifesto stable.json
+
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release, exemplo: v1.081.3"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  atualizar-manifesto:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Definir tag, versão e repositório
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "OWNER=$OWNER" >> "$GITHUB_ENV"
+          echo "REPO=$REPO" >> "$GITHUB_ENV"
+
+      - name: Baixar CUMA_windows.zip da Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -f CUMA_windows.zip RELEASE_NOTES.md
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "CUMA_windows.zip" --output CUMA_windows.zip
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > RELEASE_NOTES.md
+
+      - name: Atualizar updates/stable.json automaticamente
+        shell: bash
+        run: |
+          python scripts/preparar_manifesto_release.py "$OWNER" "$REPO" "$VERSION" "$PWD/CUMA_windows.zip" "$PWD/RELEASE_NOTES.md"
+
+      - name: Publicar stable.json atualizado no main
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add updates/stable.json README.md cuma_settings_template.json
+          if git diff --staged --quiet; then
+            echo "Nada para atualizar."
+          else
+            git commit -m "Atualiza manifesto stable para v$VERSION"
+            git push
+          fi
