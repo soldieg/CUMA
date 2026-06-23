@@ -1,0 +1,486 @@
+{
+  "format": "CUMA_SETTINGS",
+  "schema_version": 1,
+  "created_by": "CUMA",
+  "storage": {
+    "mode": "single_user_settings_file",
+    "user_data_dir": "auto",
+    "manual_visible_next_to_exe": true,
+    "compiled_windows_default": "%APPDATA%\\CUMA\\cuma_settings.json"
+  },
+  "config": {
+    "output_dir": "limpos",
+    "mode": "auto",
+    "profile": "Normal",
+    "compression": "Preservar qualidade máxima",
+    "export_format": "PDF",
+    "suffix": "_limpo",
+    "ranges": "",
+    "password": "",
+    "keep_first": true,
+    "keep_last": 0,
+    "overwrite_original": false,
+    "create_backup": true,
+    "open_after": true,
+    "include_subfolders": false,
+    "save_removed_pdf": true,
+    "validate_output": true,
+    "theme": "Moderno Escuro",
+    "xteink_device": "XTEINK X4",
+    "xteink_quality": 100,
+    "xteink_converter_dir": "",
+    "hardware_mode": "Automático",
+    "worker_threads": 0,
+    "enable_page_cache": true,
+    "page_cache_mb": 256,
+    "auto_save_config": true,
+    "font_size": "Normal",
+    "ui_density": "Normal",
+    "show_tooltips": true,
+    "confirm_actions": true,
+    "remember_window": false,
+    "last_window_geometry": "1360x860+120+80",
+    "remember_last_tab": true,
+    "last_tab": "Limpar",
+    "performance_profile": "Equilibrado",
+    "process_priority": "Normal",
+    "memory_saver": false,
+    "max_parallel_pdfs": 0,
+    "gpu_only_if_faster": false,
+    "gpu_fallback_cpu": true,
+    "clear_cache_on_exit": false,
+    "log_level": "Normal",
+    "auto_save_log": true,
+    "log_retention_days": 30,
+    "remember_last_folder": true,
+    "last_input_dir": "",
+    "preview_quality": "Média",
+    "preview_batch_pages": 10,
+    "preview_cache": true,
+    "preview_maximized": false,
+    "preview_thumb_width": 760,
+    "auto_process_added": false,
+    "skip_existing": false,
+    "detect_duplicates": true,
+    "resume_processing": false,
+    "silent_mode": false,
+    "xteink_output_dir": "limpos/Converter",
+    "update_manifest_url": "https://raw.githubusercontent.com/SEU_USUARIO/CUMA/main/updates/stable.json",
+    "update_channel": "stable"
+  },
+  "interface_colors": {
+    "theme_name": "Moderno Escuro",
+    "roles": {
+      "primary": "#2563EB",
+      "secondary": "#03A9F4",
+      "background": "#0F1318",
+      "surface": "#20262F",
+      "surface2": "#2B3340",
+      "sidebar_bg": "#161A20",
+      "text": "#E5E7EB",
+      "border": "#38414E",
+      "danger": "#FF6B6B"
+    },
+    "theme_mode": "Automático",
+    "custom_base": "Escuro",
+    "custom_accent": "#C026FF"
+  },
+  "device_profiles": {
+    "XTEINK X4": {
+      "width": 480,
+      "height": 800,
+      "dpi": 212,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.0,
+      "margin": 0,
+      "category": "XTEINK"
+    },
+    "XTEINK X3": {
+      "width": 528,
+      "height": 792,
+      "dpi": 212,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.0,
+      "margin": 0,
+      "category": "XTEINK"
+    },
+    "Kindle Paperwhite 12ª gen": {
+      "width": 1264,
+      "height": 1680,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.1,
+      "margin": 0,
+      "category": "Kindle"
+    },
+    "Kindle Colorsoft": {
+      "width": 1264,
+      "height": 1680,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.1,
+      "margin": 0,
+      "category": "Kindle"
+    },
+    "Kobo Clara Colour": {
+      "width": 1072,
+      "height": 1448,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.1,
+      "margin": 0,
+      "category": "Kobo"
+    },
+    "Kobo Libra Colour": {
+      "width": 1264,
+      "height": 1680,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.1,
+      "margin": 0,
+      "category": "Kobo"
+    },
+    "Kobo Elipsa 2E": {
+      "width": 1404,
+      "height": 1872,
+      "dpi": 227,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.0,
+      "margin": 0,
+      "category": "Kobo"
+    },
+    "BOOX Page": {
+      "width": 1264,
+      "height": 1680,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "BOOX"
+    },
+    "BOOX Go 10.3": {
+      "width": 1860,
+      "height": 2480,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.0,
+      "margin": 0,
+      "category": "BOOX"
+    },
+    "PocketBook Verse Pro": {
+      "width": 1072,
+      "height": 1448,
+      "dpi": 300,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "PocketBook"
+    },
+    "Smartphone - iPhone 16": {
+      "width": 1179,
+      "height": 2556,
+      "dpi": 460,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - iPhone 16 Plus": {
+      "width": 1290,
+      "height": 2796,
+      "dpi": 460,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - iPhone 16 Pro": {
+      "width": 1206,
+      "height": 2622,
+      "dpi": 460,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - iPhone 16 Pro Max": {
+      "width": 1320,
+      "height": 2868,
+      "dpi": 460,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Samsung Galaxy S25": {
+      "width": 1080,
+      "height": 2340,
+      "dpi": 416,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Samsung Galaxy S25+": {
+      "width": 1440,
+      "height": 3120,
+      "dpi": 513,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Samsung Galaxy S25 Ultra": {
+      "width": 1440,
+      "height": 3120,
+      "dpi": 498,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Google Pixel 9": {
+      "width": 1080,
+      "height": 2424,
+      "dpi": 422,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Google Pixel 9 Pro XL": {
+      "width": 1344,
+      "height": 2992,
+      "dpi": 486,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Motorola Edge 40 Pro": {
+      "width": 1080,
+      "height": 2400,
+      "dpi": 395,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Xiaomi 15 Pro": {
+      "width": 1440,
+      "height": 3200,
+      "dpi": 522,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - OnePlus 12": {
+      "width": 1440,
+      "height": 3168,
+      "dpi": 510,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Smartphone - Redmi Note 14 Pro+": {
+      "width": 1220,
+      "height": 2712,
+      "dpi": 446,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.05,
+      "margin": 0,
+      "category": "Smartphone"
+    },
+    "Personalizado": {
+      "width": 600,
+      "height": 800,
+      "dpi": 200,
+      "jpeg_quality": 100,
+      "gamma": 1.0,
+      "contrast": 1.0,
+      "sharpen": 0.0,
+      "margin": 0,
+      "category": "Custom"
+    }
+  },
+  "version_state": {
+    "current_version": "1.081.2",
+    "base_version": "1.080.0",
+    "schema": {
+      "grande": {
+        "aliases": [
+          "grande",
+          "major",
+          "full",
+          "full_rebuild"
+        ],
+        "descricao": "Atualização grande: incrementa o primeiro número e zera os demais."
+      },
+      "media": {
+        "aliases": [
+          "media",
+          "média",
+          "medium",
+          "feature",
+          "recovery_partial"
+        ],
+        "descricao": "Atualização média: soma 10 no bloco central e zera correções."
+      },
+      "pequena": {
+        "aliases": [
+          "pequena",
+          "small",
+          "minor",
+          "half_patch"
+        ],
+        "descricao": "Atualização pequena: soma 1 no bloco central e zera correções."
+      },
+      "pouca": {
+        "aliases": [
+          "pouca",
+          "patch",
+          "hotfix",
+          "fix",
+          "correcao",
+          "correção"
+        ],
+        "descricao": "Atualização pontual/hotfix: soma 1 no terceiro número."
+      }
+    },
+    "events": [
+      {
+        "update_id": "base_1_080_0",
+        "version": "1.080.0",
+        "base_version": "1.080.0",
+        "scale": "base",
+        "description": "Marco base definido pelo usuário após V11 e reaplicação dos hotfixes.",
+        "timestamp": "2026-06-22T23:04:30"
+      },
+      {
+        "update_id": "ui_icon_themes_sidebar_scrollbar_1081",
+        "version": "1.081.0",
+        "base_version": "1.080.0",
+        "scale": "pequena",
+        "description": "Temas baseados no ícone do CUMA, tela inicial Limpar por sessão e refinamento visual de sidebar, abas, caixas e barras de rolagem.",
+        "timestamp": "2026-06-22T23:19:23"
+      },
+      {
+        "update_id": "release_stability_manual_debug_1081_1",
+        "version": "1.081.1",
+        "base_version": "1.080.0",
+        "scale": "pouca",
+        "description": "Consolidação de lançamento: relatório único, manual TXT completo, manual interativo curto, escrita de metadados idempotente e melhorias de memória em PDF/XTCH.",
+        "timestamp": "2026-06-22T23:42:39"
+      },
+      {
+        "update_id": "storage_consolidation_user_data_1081_2",
+        "version": "1.081.2",
+        "base_version": "1.080.0",
+        "scale": "pouca",
+        "description": "Consolidação dos JSONs em cuma_settings.json, dados graváveis em pasta de usuário, limpeza de pacote e manual atualizado.",
+        "timestamp": "2026-06-22T00:00:00"
+      }
+    ]
+  },
+  "version_history": {
+    "base_version": "1.080.0",
+    "current_version": "1.081.2",
+    "events": [
+      {
+        "update_id": "base_1_080_0",
+        "version": "1.080.0",
+        "base_version": "1.080.0",
+        "scale": "base",
+        "description": "Marco base definido pelo usuário após V11 e reaplicação dos hotfixes.",
+        "timestamp": "2026-06-22T23:04:30"
+      },
+      {
+        "update_id": "ui_icon_themes_sidebar_scrollbar_1081",
+        "version": "1.081.0",
+        "base_version": "1.080.0",
+        "scale": "pequena",
+        "description": "Temas baseados no ícone do CUMA, tela inicial Limpar por sessão e refinamento visual de sidebar, abas, caixas e barras de rolagem.",
+        "timestamp": "2026-06-22T23:19:23"
+      },
+      {
+        "update_id": "release_stability_manual_debug_1081_1",
+        "version": "1.081.1",
+        "base_version": "1.080.0",
+        "scale": "pouca",
+        "description": "Consolidação de lançamento: relatório único, manual TXT completo, manual interativo curto, escrita de metadados idempotente e melhorias de memória em PDF/XTCH.",
+        "timestamp": "2026-06-22T23:42:39"
+      },
+      {
+        "update_id": "storage_consolidation_user_data_1081_2",
+        "version": "1.081.2",
+        "base_version": "1.080.0",
+        "scale": "pouca",
+        "description": "Consolidação dos JSONs em cuma_settings.json, dados graváveis em pasta de usuário, limpeza de pacote e manual atualizado.",
+        "timestamp": "2026-06-22T00:00:00"
+      }
+    ]
+  },
+  "version": {
+    "name": "CUMA - Conversor Ultimate de Mangás",
+    "version": "1.081.2",
+    "base_version": "1.080.0",
+    "build": "storage_consolidation_1_081_2",
+    "notes": "Configurações consolidadas em cuma_settings.json, dados graváveis movidos para a pasta do usuário e pacote de distribuição mais limpo.",
+    "versioning": {
+      "grande": "incrementa o primeiro número: 1.080.0 -> 2.000.0",
+      "media": "soma 10 no bloco central: 1.080.0 -> 1.090.0",
+      "pequena": "soma 1 no bloco central: 1.080.0 -> 1.081.0",
+      "pouca": "soma 1 no terceiro número: 1.080.0 -> 1.080.1"
+    },
+    "updated_at": "2026-06-22"
+  },
+  "runtime": {}
+}

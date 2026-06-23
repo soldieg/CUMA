@@ -1,0 +1,24 @@
+CUMA - Conversor Ultimate de Mangás
+Versão: 1.081.2
+
+COMO USAR
+1. Extraia o ZIP inteiro.
+2. Abra cuma.exe.
+3. Não apague a pasta _internal.
+4. O manual completo está em manual_do_programa.txt.
+
+ESTRUTURA RECOMENDADA
+CUMA/
+  cuma.exe
+  manual_do_programa.txt
+  LEIA-ME.txt
+  _internal/
+
+DADOS DO USUÁRIO
+As configurações ficam em um único arquivo:
+%APPDATA%\CUMA\cuma_settings.json
+
+Logs e relatórios de erro também ficam em %APPDATA%\CUMA quando forem necessários.
+
+OBSERVAÇÃO
+Não distribua a pasta limpos/, arquivos convertidos, CUMA.log, erro.txt ou arquivos de debug.

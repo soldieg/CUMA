@@ -1,0 +1,52 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+from PyInstaller.utils.hooks import collect_data_files
+
+# CUMA 1.081.2
+# Dados editáveis do usuário não são empacotados como JSONs soltos.
+# O app cria/usa %APPDATA%\CUMA\cuma_settings.json quando compilado.
+datas = [
+    ('cuma_settings_template.json', '.'),
+    ('cuma_logo.png', '.'),
+    ('app_icon.ico', '.'),
+]
+try:
+    datas += collect_data_files('tkinterdnd2')
+except Exception:
+    pass
+
+a = Analysis(
+    ['cuma.py'],
+    pathex=[],
+    binaries=[],
+    datas=datas,
+    hiddenimports=['PIL._tkinter_finder', 'fitz', 'numpy', 'tkinterdnd2'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+pyz = PYZ(a.pure, a.zipped_data)
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='cuma',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    icon='app_icon.ico',
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='cuma',
+)

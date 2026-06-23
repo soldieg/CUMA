@@ -1,0 +1,6 @@
+pymupdf
+numpy
+pillow
+# Opcional para arrastar-e-soltar; se faltar, o CUMA abre normalmente sem DnD.
+tkinterdnd2
+pyinstaller

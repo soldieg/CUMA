@@ -1,0 +1,582 @@
+MANUAL COMPLETO DO CUMA - Conversor Ultimate de Mangás
+Versão: 1.081.2
+Base de versionamento: 1.080.0
+
+===============================================================================
+1. VISÃO GERAL
+===============================================================================
+
+O CUMA é um aplicativo desktop para organizar fluxos de mangás e PDFs. Ele
+concentra quatro trabalhos principais:
+
+1. Limpar PDFs, removendo páginas vazias ou pouco úteis.
+2. Exportar o resultado como PDF, PDF + CBZ, CBZ ou imagens.
+3. Usar ferramentas auxiliares para extrair páginas e montar PDFs de imagens.
+4. Converter PDFs/EPUBs para formatos voltados a leitura em e-readers e
+   dispositivos compactos, incluindo EPUB baseado em imagens e XTCH nativo.
+
+A interface é dividida em sete áreas laterais:
+
+• Limpar: fluxo principal de limpeza e exportação de PDFs.
+• Ferramentas: utilidades auxiliares fora da fila principal.
+• Converter: conversões PDF → EPUB, PDF → XTCH e EPUB → XTCH.
+• Resultados: lista os processos concluídos e os arquivos gerados.
+• Registros: mostra mensagens internas, logs e diagnósticos.
+• Configurações: aparência, idioma, desempenho, hardware, segurança e logs.
+• Sobre: resumo do aplicativo, versão e acesso aos manuais.
+
+O botão Manual no topo abre o manual interativo simplificado. Este arquivo TXT é
+a referência completa para lançamento, suporte e uso avançado.
+
+===============================================================================
+2. BOTÕES DO TOPO
+===============================================================================
+
+Manual
+Abre o manual interativo do CUMA. Ele é propositalmente mais curto que este TXT e
+serve para orientar rapidamente o usuário dentro do aplicativo.
+
+Log
+Abre o arquivo de log do aplicativo quando existir. Use para investigar falhas,
+conferir mensagens internas ou enviar diagnóstico.
+
+Procurar atualizações
+Verifica os metadados de versão configurados no aplicativo. Quando uma fonte de
+atualização estiver configurada, compara a versão atual com a versão disponível.
+
+Botão de tema rápido, normalmente “☀ Tema claro” ou equivalente
+Alterna rapidamente o modo visual entre aparência clara e escura. As opções
+completas ficam em Configurações > Temas e cores.
+
+===============================================================================
+3. ABA LIMPAR
+===============================================================================
+
+A aba Limpar é o fluxo principal do programa.
+
+Área “Arraste PDFs ou pastas aqui”
+Permite soltar PDFs ou pastas diretamente na fila. Quando tkinterdnd2 não estiver
+instalado, o aplicativo continua funcionando, mas o arrastar-e-soltar pode ficar
+indisponível. Nesse caso, use os botões de seleção de arquivos/pastas.
+
+Incluir subpastas
+Quando marcado, ao adicionar uma pasta o CUMA também procura PDFs dentro das
+subpastas. Útil para coleções grandes organizadas por capítulos.
+
+Pasta de saída
+Define onde os arquivos limpos serão gravados. Esta pasta é independente da pasta
+do Converter. A partir dos hotfixes, mudar a saída do Converter não altera a
+saída da aba Limpar.
+
+Botão Escolher, ao lado de Pasta de saída
+Abre o seletor de pasta para escolher a saída da limpeza.
+
+Sufixo
+Texto adicionado ao nome do arquivo de saída. Exemplo: se o PDF original for
+capitulo01.pdf e o sufixo for _limpo, o resultado será capitulo01_limpo.pdf.
+
+Formato de exportação
+Define o tipo de saída:
+• PDF: cria apenas o PDF limpo.
+• PDF + CBZ: cria o PDF limpo e um CBZ com as páginas mantidas.
+• CBZ: cria apenas o CBZ.
+• Imagens JPG: exporta as páginas mantidas como JPG.
+• Imagens PNG: exporta as páginas mantidas como PNG.
+
+Intervalo de páginas
+Permite limitar o processamento a páginas específicas. Exemplos:
+• 1-10: processa da página 1 até a 10.
+• 1-5, 8, 12-15: processa blocos separados.
+• vazio: processa todas as páginas.
+
+Abrir resultado ao concluir
+Quando marcado, o CUMA tenta abrir a pasta ou o arquivo final ao terminar.
+
+Carregar prévia do selecionado
+Renderiza uma prévia do PDF selecionado na fila. Use para conferir visualmente
+antes de processar.
+
+Processar selecionados
+Processa apenas os itens selecionados na fila.
+
+Processar tudo
+Processa todos os itens da fila.
+
+Cancelar
+Solicita cancelamento do processamento atual. O cancelamento ocorre de forma
+segura entre etapas/páginas.
+
+Pause
+Pausa o processamento em lote. O item atual pode terminar a etapa em andamento
+antes de parar.
+
+Play
+Retoma um processamento pausado.
+
+Como o CUMA decide o que remover
+O CUMA avalia densidade visual, presença de imagens grandes e perfil escolhido.
+Páginas com baixa densidade podem ser tratadas como vazias. Em mangás, páginas
+com imagem principal são preservadas. Em PDFs mistos, o modo visual preserva a
+página renderizada.
+
+Perfis de limpeza
+• Conservador: remove menos páginas; indicado quando você quer evitar perdas.
+• Normal: equilíbrio entre segurança e limpeza.
+• Agressivo: remove mais páginas; use depois de testar em uma cópia.
+
+Opção “Manter primeira página”
+Mantém a primeira página quando aplicável, mas o algoritmo evita preservar uma
+primeira página completamente vazia.
+
+Opção “Manter últimas páginas”
+Força a preservação das últimas páginas informadas. Útil quando o final tem
+créditos, capa extra ou informações importantes.
+
+Salvar páginas removidas
+Cria um PDF separado com as páginas descartadas. Recomendado para auditoria antes
+de apagar originais.
+
+Criar backup
+Cria cópia de segurança quando a operação puder substituir ou interferir em
+arquivos existentes.
+
+Sobrescrever original
+Deve ser usado com cuidado. Para lançamento e uso comum, prefira manter desligado
+e gerar arquivo novo com sufixo.
+
+===============================================================================
+4. ABA FERRAMENTAS
+===============================================================================
+
+A aba Ferramentas reúne funções auxiliares.
+
+Extrair páginas dos PDFs selecionados como imagens
+Transforma páginas dos PDFs selecionados em arquivos de imagem. Use quando você
+quer editar páginas fora do CUMA ou criar uma sequência de imagens.
+
+Criar PDF a partir de várias imagens
+Monta um PDF usando imagens selecionadas. A rotina de lançamento processa imagens
+uma a uma para reduzir consumo de memória em coleções grandes.
+
+Salvar como PNG; desligado salva JPG
+Define o formato das imagens extraídas. PNG preserva mais, mas costuma gerar
+arquivos maiores. JPG é menor e geralmente suficiente para mangás.
+
+Abrir pasta ao concluir
+Abre a pasta final depois que a ferramenta terminar.
+
+Zoom/renderização
+Controla a escala usada ao renderizar páginas de PDF como imagem. Valores mais
+altos melhoram definição, mas aumentam tempo e tamanho.
+
+Nome do PDF
+Nome usado ao criar PDF a partir de imagens.
+
+Processar selecionados
+Executa a ferramenta escolhida apenas nos arquivos selecionados.
+
+Processar todos
+Executa a ferramenta em todos os arquivos adicionados.
+
+Criar PDF dos selecionados
+Monta PDF usando somente as imagens selecionadas.
+
+Criar PDF de todos
+Monta PDF usando todas as imagens adicionadas à ferramenta.
+
+Cancelar, Pause e Play
+Têm o mesmo papel da aba Limpar: cancelar, pausar ou retomar tarefas em lote.
+
+===============================================================================
+5. ABA CONVERTER
+===============================================================================
+
+A aba Converter prepara arquivos para leitura em e-readers, celulares e
+dispositivos compatíveis.
+
+Área “Arraste PDFs, EPUBs ou pastas aqui”
+Recebe PDFs, EPUBs e pastas. Se o recurso de arrastar-e-soltar estiver
+indisponível, use os botões de adição.
+
+Dispositivo
+Escolhe o perfil de destino. O perfil define largura, altura, DPI, qualidade,
+margem e ajustes de imagem. Exemplos incluídos: XTEINK X4, XTEINK X3, Kindle,
+Kobo, BOOX, PocketBook, reMarkable e smartphones.
+
+Aplicar perfil
+Aplica o perfil selecionado ao fluxo de conversão.
+
+Editor de perfis
+Abre a janela para ajustar ou criar perfis de dispositivo.
+
+Abrir pasta Converter
+Abre a pasta de saída própria do Converter.
+
+Pasta de saída
+Define onde EPUBs e XTCHs serão gravados. Esta pasta é separada da pasta da aba
+Limpar.
+
+Botão Escolher, ao lado da pasta do Converter
+Abre o seletor de pasta para a saída do Converter.
+
+Qualidade do arquivo (%)
+Controla a qualidade usada principalmente em EPUBs baseados em imagem. Valores
+altos preservam mais detalhes e aumentam o tamanho final.
+
+PDF para EPUB
+Gera um EPUB de imagens a partir do PDF. É indicado para leitores que aceitam EPUB
+e para casos em que você quer navegação mais comum de e-book.
+
+PDF para XTCH
+Gera XTCH nativo diretamente do PDF. A rotina atual processa página por página,
+reduzindo RAM em PDFs grandes.
+
+EPUB para XTCH
+Converte EPUBs baseados em imagens para XTCH. EPUBs puramente textuais não são
+renderizados nativamente nesta versão.
+
+Processar selecionados
+Converte apenas os itens selecionados na fila.
+
+Processar tudo
+Converte todos os itens adicionados.
+
+Cancelar, Pause e Play
+Cancelam, pausam e retomam a conversão em lote.
+
+Detalhes do XTCH
+O XTCH é gerado nativamente em Python. O CUMA monta páginas XTH em grayscale
+2-bit e empacota o contêiner XTCH sem depender de Node, npm, bun ou workers
+externos.
+
+===============================================================================
+6. EDITOR DE PERFIS DE DISPOSITIVO
+===============================================================================
+
+Perfil carregado
+Mostra o perfil atualmente aberto para edição.
+
+Salvar como nome
+Define o nome usado ao salvar um perfil personalizado.
+
+Largura e altura
+Resolução final em pixels.
+
+DPI
+Densidade de referência do dispositivo. Ajuda a documentar e ajustar perfis.
+
+Qualidade/JPEG
+Qualidade de compressão para saídas que usam JPEG.
+
+Gamma, contraste e nitidez
+Ajustes finos de imagem. Use com moderação:
+• Gamma altera brilho médio.
+• Contraste destaca diferença entre tons.
+• Nitidez reforça bordas.
+
+Margem
+Adiciona ou remove espaço em torno da página, dependendo do fluxo de conversão.
+
+Salvar no perfil atual
+Atualiza o perfil selecionado com os valores da janela.
+
+Salvar como novo personalizado
+Cria um perfil novo usando o nome informado em “Salvar como nome”.
+
+Restaurar perfis padrão
+Recria os perfis originais distribuídos com o CUMA. Use se um perfil foi
+alterado incorretamente.
+
+Fechar
+Fecha o editor.
+
+===============================================================================
+7. ABA RESULTADOS
+===============================================================================
+
+A aba Resultados mostra o resumo das tarefas.
+
+Colunas comuns
+• Arquivo: arquivo original.
+• Status: OK, ERRO, CANCELADO ou informação equivalente.
+• Modo: estratégia usada na limpeza/conversão.
+• Páginas: quantidade original e final quando aplicável.
+• Removidas: páginas descartadas.
+• Saída: caminho final gerado.
+• Extras: CBZ, PDF de removidas ou outros arquivos relacionados.
+• Erro: mensagem amigável quando algo falha.
+
+Use esta aba para conferir se tudo saiu corretamente antes de mover ou apagar
+arquivos originais.
+
+===============================================================================
+8. ABA REGISTROS
+===============================================================================
+
+A aba Registros centraliza logs.
+
+Abrir log
+Abre o arquivo CUMA.log.
+
+Copiar diagnóstico
+Copia um diagnóstico textual para a área de transferência. Use ao pedir suporte.
+
+Salvar log automaticamente
+Mantém registro em arquivo. Recomendado para builds de lançamento.
+
+Nível de log
+Controla o detalhamento:
+• Básico: menos mensagens.
+• Normal: equilíbrio recomendado.
+• Detalhado: mais contexto.
+• Debug: máximo detalhe, indicado para testes.
+
+Retenção de logs
+Define por quantos dias logs antigos devem ser mantidos.
+
+erro.txt
+Quando ocorre uma exceção crítica, o aplicativo pode gravar detalhes em erro.txt.
+
+debug_completo_cuma.txt
+Não precisa vir pronto dentro do pacote. Ele é gerado quando o aplicativo é
+executado com --debug-env e serve para suporte técnico.
+
+===============================================================================
+9. ABA CONFIGURAÇÕES
+===============================================================================
+
+A aba Configurações é dividida em categorias.
+
+Temas e cores
+Controla idioma, modo visual, base personalizada, cor principal e presets.
+
+Idioma do aplicativo
+Permite escolher Automático ou um idioma disponível. Automático tenta seguir o
+sistema operacional.
+
+Modo visual
+• Automático: tenta seguir o sistema; é o padrão recomendado.
+• Claro: força tema claro.
+• Escuro: força tema escuro.
+• Personalizado: libera ajuste fino com base clara ou escura.
+
+Base do personalizado
+Define se o modo personalizado começa de uma base clara ou escura.
+
+Cor principal do botão
+Define a cor de destaque principal.
+
+Personalizar cor
+Abre o seletor visual de cor.
+
+Aplicar cor
+Aplica o valor hexadecimal digitado.
+
+Preset Manga Dark
+Aplica uma base escura com aparência inspirada em mangá.
+
+Preset Escuro
+Aplica a base moderna escura.
+
+Preset Claro
+Aplica a base moderna clara.
+
+Temas do ícone CUMA
+Presets visuais derivados das cores do ícone:
+• CUMA Neon
+• CUMA Eclipse
+• CUMA Invertido
+
+Ajuste avançado das cores
+Permite alterar papéis visuais como fundo, superfície, texto, borda, primário,
+secundário e perigo. Use quando quiser refinar a identidade visual.
+
+Aplicar ajustes avançados
+Salva e aplica as cores avançadas.
+
+Restaurar tema escolhido
+Volta o tema atual para seus valores originais.
+
+Qualidade e desempenho
+Reúne perfil de desempenho, cache, paralelismo, qualidade de prévia e opções de
+memória.
+
+Hardware
+Permite escolher Automático, CPU, NVIDIA CUDA, AMD OpenCL, Intel OpenCL, OpenCL
+genérico ou CPU + GPU. O modo automático tenta detectar o melhor caminho, com
+fallback seguro para CPU.
+
+Testar aceleração
+Mostra se CUDA/OpenCL parecem disponíveis.
+
+Benchmark rápido / Benchmark CPU/GPU
+Executa teste simples de desempenho para comparar caminhos de processamento.
+
+Facilidades
+Opções de conveniência:
+• salvar configurações automaticamente;
+• mostrar dicas/tooltips;
+• confirmar ações perigosas;
+• lembrar tamanho/posição da janela;
+• lembrar última aba aberta;
+• lembrar última pasta;
+• abrir pasta ao concluir;
+• detectar duplicados;
+• pular existentes;
+• retomar processamento, quando disponível.
+
+Segurança e logs
+Opções para cache, logs, diagnóstico, confirmações e limpeza ao fechar.
+
+Salvar configurações
+Grava a configuração atual imediatamente.
+
+Fechar
+Fecha janelas auxiliares de configuração.
+
+===============================================================================
+10. ABA SOBRE
+===============================================================================
+
+A aba Sobre mostra nome do app, versão atual, resumo das abas e informações do
+sistema de versionamento.
+
+Abrir manual interativo
+Abre uma versão curta, feita para orientação rápida.
+
+Abrir manual TXT completo
+Abre este arquivo, com explicação detalhada de funções e botões.
+
+Sistema de versões
+Mostra a versão atual, a base e o número de eventos registrados.
+
+===============================================================================
+11. SISTEMA DE VERSÕES
+===============================================================================
+
+A base definida para o projeto é 1.080.0.
+
+Escalas:
+• grande: incrementa o primeiro número e zera os demais.
+  Exemplo: 1.080.0 → 2.000.0
+• média: soma 10 ao bloco central e zera o patch.
+  Exemplo: 1.080.0 → 1.090.0
+• pequena: soma 1 ao bloco central e zera o patch.
+  Exemplo: 1.080.0 → 1.081.0
+• pouca/hotfix: soma 1 ao terceiro número.
+  Exemplo: 1.081.0 → 1.081.1
+
+Arquivos relacionados:
+• version.json: metadados públicos da versão.
+• cuma_version_state.json: estado interno do versionamento.
+• cuma_version_history.json: histórico público enxuto.
+
+A função interna cuma_register_code_update(update_id, scale, description) registra
+atualizações sem duplicar eventos quando o aplicativo é aberto várias vezes.
+
+===============================================================================
+12. ARQUIVOS E DADOS DO USUÁRIO
+===============================================================================
+
+cuma.exe
+Executável compilado do aplicativo. Na distribuição one-folder, ele deve ficar junto da pasta _internal.
+
+_internal/
+Pasta interna criada pelo PyInstaller. Contém bibliotecas, DLLs, imagens, ícone, template de configurações e recursos necessários. O usuário não precisa editar esta pasta.
+
+manual_do_programa.txt
+Manual completo visível ao lado do executável. Pode ser aberto fora do aplicativo.
+
+LEIA-ME.txt
+Resumo rápido de instalação/uso para o usuário final.
+
+cuma_settings.json
+Arquivo único de configurações do usuário. Ele NÃO precisa ficar ao lado do executável. Quando o app está compilado no Windows, fica em:
+%APPDATA%\CUMA\cuma_settings.json
+
+Dentro dele ficam:
+- configuração geral da aba Limpar;
+- pasta separada do Converter;
+- temas, cores e idioma;
+- perfis de dispositivos;
+- estado e histórico de versão;
+- metadados públicos de versão;
+- pequenas preferências de runtime.
+
+CUMA.log
+Log de execução. Quando necessário, é criado em:
+%APPDATA%\CUMA\CUMA.log
+
+erro.txt
+Relatório de exceções críticas. Quando necessário, é criado em:
+%APPDATA%\CUMA\erro.txt
+
+debug_completo_cuma.txt
+Gerado somente ao executar com --debug-env. Também fica na pasta de dados do usuário.
+
+limpos/
+Pasta de saída criada somente quando o usuário processa arquivos. Não deve vir pronta no pacote final.
+===============================================================================
+13. LIMITAÇÕES CONHECIDAS
+===============================================================================
+
+• EPUB textual puro não é renderizado para XTCH nesta versão. O conversor EPUB →
+  XTCH espera EPUB baseado em imagens.
+• tkinterdnd2 é opcional. Sem ele, arrastar-e-soltar pode não funcionar, mas o
+  aplicativo abre normalmente.
+• Aceleração CUDA/OpenCL depende de drivers, OpenCV e hardware disponíveis. O
+  fallback seguro é CPU.
+• Arquivos muito grandes podem demorar. Prefira testar primeiro com poucos
+  capítulos.
+• A detecção de páginas vazias é visual/heurística. Em materiais raros, revise o
+  PDF de páginas removidas antes de apagar originais.
+
+===============================================================================
+14. FLUXOS RECOMENDADOS
+===============================================================================
+
+Fluxo seguro para lançamento/produção:
+1. Abra o CUMA.
+2. Use a aba Limpar.
+3. Ative salvar páginas removidas.
+4. Use perfil Normal ou Conservador.
+5. Processe um arquivo de teste.
+6. Confira Resultado e PDF de removidas.
+7. Só depois processe lotes grandes.
+
+Fluxo para e-reader:
+1. Abra Converter.
+2. Escolha o perfil do dispositivo.
+3. Defina a pasta do Converter.
+4. Marque PDF para EPUB ou PDF para XTCH.
+5. Processe um arquivo.
+6. Teste no dispositivo real.
+7. Ajuste perfil se necessário.
+
+Fluxo para diagnóstico:
+1. Abra Registros.
+2. Copie diagnóstico.
+3. Verifique CUMA.log e erro.txt se existirem.
+4. Execute python cuma.py --debug-env quando precisar gerar debug completo.
+
+
+===============================================================================
+ADENDO DA VERSÃO 1.081.2 - PACOTE MAIS LIMPO
+===============================================================================
+
+Esta versão consolida os arquivos JSON editáveis em um único arquivo de usuário:
+/mnt/data/cuma_10812_settings_work/_final_corrupt/cuma_settings.json
+
+Na versão compilada para Windows, isso evita que a pasta do programa fique cheia de
+config_cuma.json, cuma_interface_colors.json, version.json e arquivos similares.
+
+Para lançamento, a pasta distribuída deve ficar idealmente assim:
+
+CUMA/
+  cuma.exe
+  manual_do_programa.txt
+  LEIA-ME.txt
+  _internal/
+
+Não distribua a pasta limpos/, logs, PDFs convertidos, arquivos de teste ou builds
+antigas. Esses itens devem ser criados somente no computador do usuário.
