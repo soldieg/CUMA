@@ -1,4 +1,4 @@
-name: Atualizar manifesto stable.json
+name: Atualizar stable.json
 
 on:
   release:
@@ -6,61 +6,125 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag da release, exemplo: v1.081.3"
+        description: "Tag da release. Para seu fluxo atual use: Stable"
         required: true
+        default: "Stable"
+        type: string
+      version:
+        description: "Versão numérica do CUMA. Exemplo: 1.100.0"
+        required: true
+        default: "1.100.0"
         type: string
 
 permissions:
   contents: write
 
 jobs:
-  atualizar-manifesto:
+  atualizar-stable-json:
     runs-on: ubuntu-latest
 
     steps:
       - name: Baixar repositório
         uses: actions/checkout@v4
+        with:
+          ref: main
 
-      - name: Definir tag, versão e repositório
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${{ github.event.release.tag_name }}"
-          fi
-          VERSION="${TAG#v}"
-          OWNER="${GITHUB_REPOSITORY_OWNER}"
-          REPO="${GITHUB_REPOSITORY#*/}"
-
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "OWNER=$OWNER" >> "$GITHUB_ENV"
-          echo "REPO=$REPO" >> "$GITHUB_ENV"
-
-      - name: Baixar CUMA_windows.zip da Release
+      - name: Atualizar updates/stable.json
         env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG_EVENT: ${{ github.event.release.tag_name }}
+          RELEASE_TAG_INPUT: ${{ inputs.tag }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          rm -f CUMA_windows.zip RELEASE_NOTES.md
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "CUMA_windows.zip" --output CUMA_windows.zip
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq '.body' > RELEASE_NOTES.md
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import hashlib
+          import urllib.request
+          from pathlib import Path
 
-      - name: Atualizar updates/stable.json automaticamente
-        shell: bash
-        run: |
-          python scripts/preparar_manifesto_release.py "$OWNER" "$REPO" "$VERSION" "$PWD/CUMA_windows.zip" "$PWD/RELEASE_NOTES.md"
+          repo = os.environ["REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+          tag = (os.environ.get("RELEASE_TAG_INPUT") or os.environ.get("RELEASE_TAG_EVENT") or "Stable").strip()
+          version = (os.environ.get("VERSION_INPUT") or "").strip()
 
-      - name: Publicar stable.json atualizado no main
-        shell: bash
+          api_url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+          req = urllib.request.Request(
+              api_url,
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "CUMA-Updater-Manifest"
+              }
+          )
+          with urllib.request.urlopen(req) as response:
+              release = json.loads(response.read().decode("utf-8"))
+
+          if not version:
+              for text in (release.get("name") or "", release.get("body") or "", tag):
+                  m = re.search(r"\d+\.\d+\.\d+", text)
+                  if m:
+                      version = m.group(0)
+                      break
+          if not version:
+              raise SystemExit("Não consegui descobrir a versão. Informe a versão numérica, exemplo: 1.100.0")
+
+          assets = release.get("assets", [])
+          target_asset = next((a for a in assets if a.get("name") == "CUMA_windows.zip"), None)
+          if not target_asset:
+              nomes = [a.get("name") for a in assets]
+              raise SystemExit(f"Não encontrei CUMA_windows.zip na Release {tag}. Arquivos encontrados: {nomes}")
+
+          download_url = target_asset["browser_download_url"]
+          size_bytes = int(target_asset.get("size") or 0)
+
+          zip_path = Path("CUMA_windows.zip")
+          urllib.request.urlretrieve(download_url, zip_path)
+          sha256 = hashlib.sha256(zip_path.read_bytes()).hexdigest().upper()
+
+          notes_text = release.get("body") or ""
+          release_notes = []
+          for line in notes_text.splitlines():
+              line = line.strip()
+              if not line:
+                  continue
+              line = re.sub(r"^[\-\*#\s]+", "", line).strip()
+              if line:
+                  release_notes.append(line)
+          if not release_notes:
+              release_notes = [f"Atualização CUMA {version}."]
+
+          Path("updates").mkdir(exist_ok=True)
+          manifest = {
+              "app_id": "cuma",
+              "channel": "stable",
+              "version": version,
+              "minimum_supported_version": "1.080.0",
+              "mandatory": False,
+              "published_at": release.get("published_at", ""),
+              "download_url": download_url,
+              "sha256": sha256,
+              "size_bytes": size_bytes,
+              "release_notes": release_notes
+          }
+
+          Path("updates/stable.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8"
+          )
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Commitar stable.json
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add updates/stable.json README.md cuma_settings_template.json
-          if git diff --staged --quiet; then
-            echo "Nada para atualizar."
+          git add updates/stable.json
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração em updates/stable.json"
           else
-            git commit -m "Atualiza manifesto stable para v$VERSION"
-            git push
+            git commit -m "Atualiza stable.json"
+            git push origin main
           fi
