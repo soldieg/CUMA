@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/cuma_logo.png" alt="Logo CUMA">
+  <img src="assets/cuma_logo.png" alt="Logo CUMA" width="320">
 </p>
 
 **CUMA - Conversor Ultimate de Mangás**
