@@ -40,7 +40,7 @@ Não sou programador, mas entendo um pouco da logica de programação. Criei est
 
 ## Download
 
-A versão mais recente: <a href="https://github.com/soldiego/CUMA/releases">BAIXAR</a>
+A versão mais recente: <a href="https://github.com/soldieg/CUMA/releases">BAIXAR</a>
 
 ## Instalação
 
