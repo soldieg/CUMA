@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# PyInstaller/build
+build/
+dist/
+*.spec.bak
+
+# CUMA - arquivos gerados em execução
+_internal/
+limpos/
+CUMA.log
+erro.txt
+*.log
+
+# Configurações reais do usuário / legado local
+cuma_settings.json
+config_cuma.json
+cuma_interface_colors.json
+cuma_version_state.json
+cuma_version_history.json
+cuma_device_profiles.json
+version.json
+
+# Debugs, validações e relatórios locais
+debug_*.json
+validacao_*.json
+RELATORIO_*.txt
+
+# Builds e compactados
+*.zip
+*.rar
+*.7z
+*.exe
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini
