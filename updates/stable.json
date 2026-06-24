@@ -1,19 +1,21 @@
 {
   "app_id": "cuma",
   "channel": "stable",
-  "version": "1.100.0",
+  "version": "1.100.8",
   "minimum_supported_version": "1.080.0",
   "mandatory": false,
   "published_at": "2026-06-23",
   "download_url": "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip",
-  "sha256": "",
-  "size_bytes": 0,
+  "sha256": "73316C18A382F4EE34659AB4935248A4BA76A16D7DCA2A3140DAD8D4C7A78E2E",
+  "size_bytes": 52410023,
   "release_notes": [
-    "Versão 1.100.0 do CUMA consolidando perfis e leitura, otimização E-ink e experiência avançada.",
-    "Perfis Kindle, Kobo e reMarkable inspirados no Kindle Comic Converter.",
-    "Ordem de leitura Ocidental/Mangá, ordenação natural, corte de margens, página dupla, presets E-ink e prévia antes/depois.",
-    "CBZ/ZIP nativos e CBR/RAR/7Z via 7-Zip instalado no Windows.",
-    "Manifesto oficial configurado para https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json.",
-    "Após publicar o ZIP final na Release Stable, use o workflow ou o script local para preencher sha256 e size_bytes."
-  ]
+    "CUMA 1.100.8 - Correções de auditoria",
+    "Corrigido bug de CBZ/ZIP no Converter.",
+    "Corrigido suporte de CBR/RAR/7Z no Converter quando 7-Zip está instalado.",
+    "Adicionada escrita temporária/atômica para EPUB, CBZ e PDFs gerados.",
+    "Ferramentas validam arquivos existentes antes de processar.",
+    "Removido empacotamento de dados locais de usuário.",
+    "Build BAT agora copia documentação recente e prepara manifesto com SHA256/tamanho.",
+    "requirements.txt agora usa faixas de versão.",
+    "Versionamento, manual e histórico alinhados com 1.100.8."
 }
