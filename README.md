@@ -92,15 +92,6 @@ https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json
 ```
 
 
-
-## Atualizações via GitHub Releases
-
-O CUMA consulta:
-
-```text
-https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json
-```
-
 ## Fontes, referências e componentes utilizados
 
 Esta seção lista as fontes de código, bibliotecas, repositórios, serviços e especificações técnicas identificados no projeto. Não se trata de fontes tipográficas.
