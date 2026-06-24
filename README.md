@@ -46,7 +46,7 @@ Não sou programador, mas entendo um pouco da logica de programação. Criei est
 
 A versão compilada para Windows deve ser publicada em **GitHub Releases**:
 
-`<a href="https://github.com/soldieg/CUMA/releases">https://github.com/soldieg/CUMA/releases</a>`
+<a href="https://github.com/soldieg/CUMA/releases">https://github.com/soldieg/CUMA/releases</a>
 
 Baixe o arquivo `CUMA_windows.zip`, extraia a pasta e abra `cuma.exe`.
 
