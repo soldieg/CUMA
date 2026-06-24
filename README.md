@@ -46,8 +46,6 @@ Não sou programador, mas entendo um pouco da logica de programação. Criei est
 
 A versão mais recente: <a href="https://github.com/soldieg/CUMA/releases">https://github.com/soldieg/CUMA/releases</a>
 
-Baixe o arquivo `CUMA_windows.zip`, extraia a pasta e abra `cuma.exe`.
-
 ## Instalação
 
 1. Baixe `CUMA_windows.zip` em Releases.
