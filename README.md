@@ -33,109 +33,6 @@ Não sou programador, mas entendo um pouco da logica de programação. Criei est
 - Conversão PDF → EPUB baseado em imagens.
 - Conversão PDF → XTCH.
 - Conversão EPUB → XTCH.
-- Criação de PDF a partir de imagens.
-- Temas visuais, incluindo temas CUMA baseados no ícone.
-- Configurações preservadas em `%APPDATA%\CUMA\cuma_settings.json`.
-- Sistema de atualização por manifesto JSON no GitHub.
-
-## Novidades da versão 1.100.7
-
-Esta versão é uma atualização de documentação e manual:
-
-- Manual da raiz e `docs/manual_do_programa.txt` atualizados para explicar melhor as funções recentes.
-- Manual TXT gerado pelo botão **Manual** do aplicativo alinhado com a versão atual.
-- Criado o arquivo `ATUALIZACOES_DESDE_1.100.2.txt` com o resumo consolidado das versões 1.100.2 até 1.100.7.
-- `README.md`, `LEIA-ME.txt`, `docs/historico_versoes.md` e `updates/stable.json` alinhados com a versão 1.100.7.
-
-## Novidades da versão 1.100.6
-
-- Em **Ferramentas > Criar PDF de imagens**, agora também é possível adicionar PDFs.
-- A mesma ferramenta aceita **CBZ**, **ZIP** e **EPUB com imagens**.
-- Também aceita **CBR**, **RAR** e **7Z** quando o 7-Zip estiver instalado e disponível no PATH.
-- A geração respeita a ordem manual da lista, inclusive com **Mover pra cima ↑**, **Mover pra baixo ↓** e arraste para reordenar.
-- EPUB textual puro não é renderizado nessa função; EPUB com imagens é aceito.
-
-## Novidades da versão 1.100.5
-
-- Adicionados os botões **Mover pra cima ↑** e **Mover pra baixo ↓** nas filas de **Limpar**, **Ferramentas** e **Converter**.
-- Adicionada reordenação por clicar, segurar e arrastar uma linha da lista.
-- A ordem visível da lista é usada no processamento das funções compatíveis.
-- Removido o grande espaço vazio entre os botões e a lista da aba **Converter**.
-
-## Novidades da versão 1.100.4
-
-Esta versão é um acabamento visual e de fluxo em cima da 1.100.3:
-
-- A aba **Converter** ficou mais compacta e clara: as **Conversões compatíveis** agora ficam integradas ao painel **Dispositivos e conversões**.
-- O botão **Metadados EPUB** agora aparece somente quando o arquivo detectado é EPUB ou quando alguma conversão de saída para EPUB está marcada.
-- A aba **Limpar** não mostra mais o bloco grande de preparação visual na tela principal.
-- As opções KCC/E-ink da aba Limpar foram movidas para **Configurações do PDF**, mantendo a tela principal mais simples.
-- O botão antigo **Prévia** da aba Limpar foi substituído por **Prévia Limpar**, usando a prévia correta das opções de limpeza.
-- Corrigido o hover da tabela/lista para manter o texto legível quando o mouse passa sobre cabeçalhos/linhas.
-- A aba **Converter** continua em modo de conversão pura: ela não relimpa, não corta, não divide páginas e não reaplica presets visuais.
-
-### Texto curto para a Release do GitHub
-
-**CUMA 1.100.4** melhora o acabamento visual da aba Converter, integra as conversões compatíveis ao painel de dispositivos, torna os metadados EPUB contextuais, move as opções KCC/E-ink para Configurações do PDF e corrige a legibilidade do hover nas tabelas. Mantém a regra principal: **Limpar prepara/modifica o arquivo; Converter apenas converte o arquivo pronto**.
-
-## Novidades da versão 1.100.3
-
-Esta versão corrige a separação definitiva entre **Limpar** e **Converter**:
-
-- A aba **Converter** agora trabalha em modo de **conversão pura**.
-- O Converter não reaplica remoção de margens, presets E-ink, divisão de páginas duplas, webtoon/imagens longas ou rodapé/número de página.
-- As conversões PDF→EPUB, PDF→CBZ, PDF→imagens, EPUB→PDF, compactados→EPUB/PDF e imagem→PDF/EPUB usam a página/imagem de entrada sem encaixar em canvas de dispositivo.
-- A prévia do Converter foi ajustada para mostrar a entrada real e como ela será enviada ao conversor, sem adicionar faixas brancas.
-- A prévia antes/depois da preparação visual não usa mais o perfil de dispositivo como alvo; ela mostra somente o efeito das opções da aba Limpar.
-- XTCH continua usando o perfil de dispositivo porque o formato exige dimensões fixas, mas não reaplica os filtros da aba Limpar.
-
-## Novidades da versão 1.100.1
-
-Esta versão reorganiza a separação entre preparação e conversão:
-
-- A aba **Limpar** passa a concentrar as opções que modificam/preparam o conteúdo: presets E-ink, ordem de leitura, remoção de margens, remoção de rodapé/número de página, divisão de páginas duplas, manter original ao dividir e webtoon/imagens longas.
-- A aba **Converter** fica focada em formato de saída: dispositivo, pasta de saída, prévia antes/depois, metadados EPUB e conversões.
-- As conversões agora são exibidas dinamicamente conforme o tipo de arquivo selecionado.
-- PDF pode liberar opções como **PDF → EPUB**, **PDF → XTCH**, **PDF → CBZ** e **PDF → imagens**.
-- EPUB pode liberar **EPUB → XTCH** e **EPUB → PDF**.
-- CBZ/ZIP/CBR/RAR/7Z podem liberar **compactado → EPUB**, **compactado → XTCH** e **compactado → PDF**.
-- Imagens podem liberar **imagem → PDF**, **imagem → EPUB** e **imagem → XTCH**.
-- CBZ/ZIP continuam funcionando nativamente; CBR/RAR/7Z continuam dependendo do 7-Zip instalado no Windows.
-
-## Novidades da versão 1.100.0
-
-Esta versão consolida em uma única entrega o roadmap planejado para `1.082.0`, `1.090.0` e `1.100.0`.
-
-- Perfis reais de dispositivos Kindle, Kobo e reMarkable inspirados no Kindle Comic Converter.
-- Ordem de leitura **Ocidental** ou **Mangá**.
-- Ordenação natural de arquivos, evitando `1, 10, 2`.
-- Remoção automática de margens.
-- Remoção opcional de rodapé/número de página.
-- Divisão de páginas duplas, com ordem respeitando o modo de leitura.
-- Presets de imagem para E-ink.
-- Prévia antes/depois antes da conversão final.
-- Editor simples de metadados para EPUB.
-- CBZ/ZIP nativos; CBR/RAR/7Z por 7-Zip instalado no Windows.
-
-
-
-## Novidades da versão 1.100.3
-
-- A aba **Limpar** agora aplica de verdade as funções KCC/E-ink ao arquivo limpo.
-- **Dividir páginas duplas** divide páginas muito largas em duas páginas reais no PDF final limpo.
-- **Manter original ao dividir** mantém a página inteira e também adiciona as duas metades quando ativado.
-- **Webtoon/imagens longas**, **remover margens**, **remover rodapé/número de página** e **presets E-ink** ficam na aba Limpar, porque modificam o conteúdo.
-- A aba **Converter** continua em modo de conversão pura: ela não relimpa, não corta, não divide e não cria canvas branco novamente.
-- O botão **Prévia** do Converter foi unificado; não há mais dois botões de prévia competindo na mesma aba.
-- A prévia da aba Limpar mostra o antes/depois das alterações visuais antes de processar o arquivo inteiro.
-
-## Recursos principais
-
-- Limpeza de páginas vazias ou pouco úteis em PDFs.
-- Exportação em PDF, CBZ, PDF + CBZ e imagens.
-- Conversão PDF → EPUB baseado em imagens.
-- Conversão PDF → XTCH.
-- Conversão EPUB → XTCH.
 - Conversão EPUB → PDF para EPUBs baseados em imagens.
 - Conversão PDF → CBZ e PDF → imagens.
 - Conversão CBZ/ZIP/CBR/RAR/7Z → EPUB, XTCH ou PDF.
@@ -153,7 +50,7 @@ A versão compilada para Windows deve ser publicada em **GitHub Releases**:
 
 Baixe o arquivo `CUMA_windows.zip`, extraia a pasta e abra `cuma.exe`.
 
-## Instalação para usuário final
+## Instalação
 
 1. Baixe `CUMA_windows.zip` em Releases.
 2. Extraia o ZIP inteiro.
@@ -207,32 +104,6 @@ O CUMA consulta:
 ```text
 https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json
 ```
-
-Para publicar uma nova versão:
-
-1. Compile o programa no Windows e gere `CUMA_windows.zip`.
-2. Crie uma Release com tag no formato `Stable` no seu fluxo atual, ou tags versionadas como `v1.100.0` se preferir histórico por versão.
-3. Anexe exatamente o arquivo `CUMA_windows.zip`.
-4. Publique a Release.
-
-O workflow `.github/workflows/atualizar_stable_json.yml` baixa o ZIP da Release, calcula SHA256 e tamanho automaticamente, atualiza `updates/stable.json` e faz commit no `main`.
-
-Caso prefira fazer manualmente/localmente:
-
-```bat
-python scripts\preparar_manifesto_release.py soldieg CUMA 1.100.1 C:\caminho\para\CUMA_windows.zip Stable
-```
-
-
-## Roadmap consolidado na versão 1.100.0
-
-As etapas planejadas foram consolidadas nesta entrega:
-
-- `1.082.0` — Perfis e leitura.
-- `1.090.0` — Otimização E-ink.
-- `1.100.0` — Experiência avançada.
-
-O próximo ciclo recomendado é estabilização, testes com arquivos reais e refinamento dos algoritmos de corte/divisão.
 
 ## Fontes, referências e componentes utilizados
 
@@ -338,71 +209,6 @@ Esses módulos fazem parte do Python/CPython e não precisam ser instalados sepa
 ### Observação de créditos
 
 Esta lista foi montada a partir das referências explícitas, imports, URLs, arquivos de build e formatos encontrados no projeto. Se alguma rotina tiver sido adaptada de fórum, gist, issue, conversa técnica ou repositório externo que não esteja registrado no código, o link original deve ser adicionado aqui antes do lançamento público.
-
-
-## Conexões oficiais do GitHub configuradas para a versão 1.100.1
-
-Esta versão está configurada para usar o repositório oficial:
-
-```text
-https://github.com/soldieg/CUMA
-```
-
-Endereços usados pelo aplicativo e pelos arquivos de release:
-
-```text
-Repositório:       https://github.com/soldieg/CUMA
-Releases:          https://github.com/soldieg/CUMA/releases
-Manifesto stable:  https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json
-ZIP Stable:        https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip
-Workflow:          .github/workflows/atualizar_stable_json.yml
-Arquivo do app:    CUMA_windows.zip
-```
-
-Para o botão **Procurar atualizações** funcionar, o arquivo abaixo precisa existir no repositório, na branch `main`:
-
-```text
-updates/stable.json
-```
-
-A Release usada pelo fluxo atual é a tag:
-
-```text
-Stable
-```
-
-O ZIP anexado nessa Release deve se chamar exatamente:
-
-```text
-CUMA_windows.zip
-```
-
-
-## Alterações acrescentadas na versão 1.100.1
-
-- Reorganização da UI: funções que modificam imagem/conteúdo foram movidas para **Limpar**.
-- O Converter mantém os perfis de dispositivo, a prévia antes/depois e os metadados EPUB.
-- As opções de conversão agora são liberadas por tipo de arquivo selecionado.
-- Novas rotas de conversão: PDF→CBZ, PDF→imagens, EPUB→PDF, compactados→PDF e imagem→PDF/EPUB/XTCH.
-- Mantida a base de atualização via `https://github.com/soldieg/CUMA` e Release `Stable`.
-
-## Alterações acrescentadas na versão 1.100.0
-
-A versão `1.100.0` consolida as etapas planejadas `1.082.0`, `1.090.0` e `1.100.0` em uma única entrega:
-
-- Perfis reais de dispositivos Kindle, Kobo e reMarkable.
-- Ordem de leitura **Ocidental** e **Mangá**.
-- Ordenação natural de arquivos.
-- Remoção automática de margens.
-- Remoção opcional de rodapé/número de página.
-- Divisão de páginas duplas.
-- Presets E-ink.
-- Prévia antes/depois.
-- Editor simples de metadados para EPUB.
-- Conversão CBZ/ZIP nativa.
-- Suporte a CBR/RAR/7Z por 7-Zip instalado no Windows.
-- Correção das URLs oficiais de atualização para `soldieg/CUMA`.
-- Migração automática de configurações antigas de atualização que ainda apontem para URLs antigas.
 
 ## Fontes e referências acrescentadas neste update
 
