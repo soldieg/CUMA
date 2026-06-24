@@ -1,24 +1,24 @@
 CUMA - Conversor Ultimate de Mangás
-Versão: 1.081.2
+Versão: 1.100.8
 
 COMO USAR
 1. Extraia o ZIP inteiro.
 2. Abra cuma.exe.
 3. Não apague a pasta _internal.
 4. O manual completo está em manual_do_programa.txt.
+5. O resumo das mudanças recentes está em ATUALIZACOES_DESDE_1.100.2.txt.
+6. O relatório das correções está em AUDITORIA_CORRECOES_1.100.8.txt.
 
-ESTRUTURA RECOMENDADA
-CUMA/
-  cuma.exe
-  manual_do_programa.txt
-  LEIA-ME.txt
-  _internal/
+CORREÇÕES DA 1.100.8
+- Corrigido CBZ/ZIP no Converter.
+- Corrigido CBR/RAR/7Z no Converter quando 7-Zip estiver instalado.
+- EPUB, CBZ e PDFs gerados agora usam escrita temporária/atômica.
+- Ferramentas validam arquivos existentes antes de processar.
+- O pacote não inclui .cuma_user_data/cuma_settings.json.
+- O build prepara o manifesto de atualização com SHA256/tamanho do ZIP final.
 
 DADOS DO USUÁRIO
-As configurações ficam em um único arquivo:
+As configurações ficam em:
 %APPDATA%\CUMA\cuma_settings.json
 
-Logs e relatórios de erro também ficam em %APPDATA%\CUMA quando forem necessários.
-
-OBSERVAÇÃO
-Não distribua a pasta limpos/, arquivos convertidos, CUMA.log, erro.txt ou arquivos de debug.
+Não distribua a pasta limpos/, arquivos convertidos, CUMA.log, erro.txt, debug_completo_cuma.txt ou .cuma_user_data.
