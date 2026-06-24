@@ -32,6 +32,7 @@ import sys
 import threading
 import traceback
 import time
+import tempfile
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import uuid
@@ -61,7 +62,7 @@ except Exception:
     DND_AVAILABLE = False
 
 APP_NAME = "CUMA"
-APP_VERSION = "1.081.2 CUMA"
+APP_VERSION = "1.100.11 CUMA"
 CONFIG_FILE = "config_cuma.json"
 LOG_FILE = "CUMA.log"
 MANUAL_FILE = "manual_do_programa.txt"
@@ -701,11 +702,14 @@ class PDFCleaner:
             total = len(src)
             res.original_pages = total
             indices = set(parse_ranges(self.cfg.ranges, total))
+            protected_indices: set[int] = set()
             if self.cfg.keep_first and total:
                 indices.add(0)
+                protected_indices.add(0)
             keep_last = max(0, int(self.cfg.keep_last or 0))
             for idx in range(max(0, total - keep_last), total):
                 indices.add(idx)
+                protected_indices.add(idx)
             ordered = sorted(indices)
             if not ordered:
                 raise RuntimeError("Nenhuma página válida selecionada.")
@@ -720,7 +724,9 @@ class PDFCleaner:
                     raise RuntimeError("Processamento cancelado pelo usuário.")
                 page = src[idx]
                 dens = self.density(page)
-                if idx == 0 and dens < 5:
+                if idx in protected_indices:
+                    keep = True
+                elif idx == 0 and dens < 5:
                     keep = False
                 elif mode == "image":
                     keep = self.has_large_image(page)
@@ -752,8 +758,7 @@ class PDFCleaner:
             if fmt in ("PDF", "PDF + CBZ"):
                 temp.unlink(missing_ok=True)
                 out.save(str(temp), garbage=4, deflate=True, clean=True)
-                output_pdf.unlink(missing_ok=True)
-                temp.replace(output_pdf)
+                os.replace(str(temp), str(output_pdf))
                 if self.cfg.validate_output:
                     validate_pdf(output_pdf)
             elif fmt == "CBZ":
@@ -771,7 +776,13 @@ class PDFCleaner:
                 res.output = str(folder)
             if self.cfg.save_removed_pdf and removed_indices:
                 removed_path = output_pdf.with_name(output_pdf.stem + "_paginas_removidas.pdf")
-                removed_doc.save(str(removed_path), garbage=4, deflate=True, clean=True)
+                removed_tmp = removed_path.with_suffix(removed_path.suffix + ".tmp")
+                removed_tmp.unlink(missing_ok=True)
+                try:
+                    removed_doc.save(str(removed_tmp), garbage=4, deflate=True, clean=True)
+                    os.replace(str(removed_tmp), str(removed_path))
+                finally:
+                    removed_tmp.unlink(missing_ok=True)
                 res.removed_pdf = str(removed_path)
             res.extra_outputs = " | ".join(extra_outputs)
             if fmt in ("PDF", "PDF + CBZ"):
@@ -804,9 +815,19 @@ class PDFCleaner:
 
     def export_cbz(self, src: fitz.Document, indices: list[int], out_cbz: Path) -> None:
         out_cbz.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(out_cbz, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for n, idx in enumerate(indices, 1):
-                z.writestr(f"page_{n:04d}.jpg", self.render_page_bytes(src, idx, "JPEG"))
+        tmp_cbz = out_cbz.with_suffix(out_cbz.suffix + ".tmp")
+        tmp_cbz.unlink(missing_ok=True)
+        try:
+            count = 0
+            with zipfile.ZipFile(tmp_cbz, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                for n, idx in enumerate(indices, 1):
+                    count += 1
+                    z.writestr(f"page_{n:04d}.jpg", self.render_page_bytes(src, idx, "JPEG"))
+            if count <= 0:
+                raise RuntimeError("Nenhuma página para criar CBZ.")
+            os.replace(str(tmp_cbz), str(out_cbz))
+        finally:
+            tmp_cbz.unlink(missing_ok=True)
 
     def export_images(self, src: fitz.Document, indices: list[int], folder: Path, fmt: str) -> None:
         folder.mkdir(parents=True, exist_ok=True)
@@ -1528,7 +1549,7 @@ class BaseApp:
 
     def add_paths(self, paths: Iterable[str | Path]) -> None:
         added = 0
-        existing = {p.resolve().as_posix().lower() for p in self.files}
+        existing = {_cuma_11008_path_key(p) for p in self.files}
         expanded: list[Path] = []
         for raw in paths:
             p = Path(str(raw).strip()).expanduser()
@@ -1539,7 +1560,7 @@ class BaseApp:
         for p in expanded:
             if not p.exists() or p.suffix.lower() != ".pdf":
                 continue
-            key = p.resolve().as_posix().lower()
+            key = _cuma_11008_path_key(p)
             if key in existing:
                 continue
             existing.add(key)
@@ -1551,11 +1572,11 @@ class BaseApp:
 
     def selected_paths(self) -> list[Path]:
         selected = set(self.tree.selection())
-        return [p for p in self.files if p.resolve().as_posix().lower() in selected]
+        return [p for p in self.files if _cuma_11008_path_key(p) in selected]
 
     def remove_selected(self) -> None:
         selected = set(self.tree.selection())
-        self.files = [p for p in self.files if p.resolve().as_posix().lower() not in selected]
+        self.files = [p for p in self.files if _cuma_11008_path_key(p) not in selected]
         for iid in selected:
             if self.tree.exists(iid):
                 self.tree.delete(iid)
@@ -1683,7 +1704,7 @@ class BaseApp:
                 break
             while not self.pause_event.is_set() and not self.cancel_requested:
                 time.sleep(0.1)
-            iid = pdf.resolve().as_posix().lower()
+            iid = _cuma_11008_path_key(pdf)
             self.q.put(("tree", (iid, pdf.name, "Processando", "", "", "", "", "", "")))
             try:
                 if cfg.overwrite_original:
@@ -1747,7 +1768,7 @@ class BaseApp:
                         if candidate.exists() and candidate.suffix.lower() == '.pdf' and hasattr(self, 'add_xteink_path'):
                             added = self.add_xteink_path(candidate)
                         if added:
-                            iid = candidate.resolve().as_posix().lower()
+                            iid = _cuma_11008_path_key(candidate)
                             self._converter_auto_queue_count = int(getattr(self, '_converter_auto_queue_count', 0)) + 1
                             self._converter_auto_queue_items = list(getattr(self, '_converter_auto_queue_items', [])) + [candidate.name]
                             self._converter_auto_queue_iids = list(getattr(self, '_converter_auto_queue_iids', [])) + [iid]
@@ -1874,7 +1895,7 @@ class BaseApp:
         if path.suffix.lower() not in (".pdf", ".epub") or not path.exists() or path in self.xteink_files:
             return False
         self.xteink_files.append(path)
-        iid = path.resolve().as_posix().lower()
+        iid = _cuma_11008_path_key(path)
         if not self.xteink_tree.exists(iid):
             self.xteink_tree.insert("", "end", iid=iid, values=(path.name, "Aguardando", path.suffix[1:].upper(), "", ""))
         self.xteink_input.set(str(path))
@@ -1903,7 +1924,7 @@ class BaseApp:
     def remove_xteink_selected(self) -> None:
         for iid in self.xteink_tree.selection():
             self.xteink_tree.delete(iid)
-            self.xteink_files = [p for p in self.xteink_files if p.resolve().as_posix().lower() != iid]
+            self.xteink_files = [p for p in self.xteink_files if _cuma_11008_path_key(p) != iid]
         self.update_xteink_counter()
     def clear_xteink_files(self) -> None:
         self.xteink_files.clear()
@@ -1915,7 +1936,7 @@ class BaseApp:
         self.update_xteink_counter()
     def open_xteink_preview(self) -> None:
         selected = self.xteink_tree.selection()
-        path = next((p for p in self.xteink_files if selected and p.resolve().as_posix().lower() == selected[0]), self.xteink_files[0] if self.xteink_files else None)
+        path = next((p for p in self.xteink_files if selected and _cuma_11008_path_key(p) == selected[0]), self.xteink_files[0] if self.xteink_files else None)
         if not path: messagebox.showwarning("Prévia", "Selecione ou adicione um PDF/EPUB."); return
         if path.suffix.lower() == ".pdf": self.files = [path]; self.open_preview_window()
         else: messagebox.showinfo("Prévia", "Prévia direta está disponível para PDF. EPUB será convertido normalmente.")
@@ -1935,7 +1956,7 @@ class BaseApp:
         for item in parse_drop(event.data, self.root): self.add_xteink_path(Path(item))
     def xteink_selected_paths(self) -> list[Path]:
         selected = set(self.xteink_tree.selection())
-        return [p for p in self.xteink_files if not selected or p.resolve().as_posix().lower() in selected]
+        return [p for p in self.xteink_files if not selected or _cuma_11008_path_key(p) in selected]
     def process_xteink_selected(self) -> None:
         self.process_xteink_paths(self.xteink_selected_paths())
     def process_xteink_all(self) -> None:
@@ -1960,7 +1981,7 @@ class BaseApp:
                     break
                 while not self.pause_event.is_set() and not self.cancel_requested:
                     time.sleep(0.1)
-                iid = src.resolve().as_posix().lower()
+                iid = _cuma_11008_path_key(src)
                 self.xteink_input.set(str(src))
                 self.xteink_current_prog["value"] = 5
                 try:
@@ -2085,7 +2106,7 @@ def _base_main() -> None:
 # uma nova atualização visual.
 # =============================================================================
 APP_DISPLAY_NAME = "CUMA - Conversor Ultimate de Mangás"
-APP_DISPLAY_VERSION = "1.081.2"
+APP_DISPLAY_VERSION = "1.081.3"
 APP_SUBTITLE = "Conversor Ultimate de Mangás: limpeza, exportação e conversão de PDFs, imagens, EPUB e XTCH."
 INTERFACE_MAINTENANCE_RULE = (
     "Sempre que houver nova atualização visual, a interface antiga deve ser removida "
@@ -4163,7 +4184,7 @@ def _cuma_poll_xteink_queue(self) -> None:
             kind = item.get('kind')
             if kind == 'item_start':
                 src = Path(item['src'])
-                iid = src.resolve().as_posix().lower()
+                iid = _cuma_11008_path_key(src)
                 _cuma_patch_var_set(getattr(self, 'xteink_input', None), str(src))
                 try: self.xteink_tree.set(iid, 'status', _cuma_fix_mojibake_text(item.get('status', 'Processando')))
                 except Exception: pass
@@ -4172,7 +4193,7 @@ def _cuma_poll_xteink_queue(self) -> None:
                 _cuma_patch_var_set(getattr(self, 'xteink_status', None), f"XTEINK {item.get('index', 0)}/{item.get('total', 0)}")
             elif kind == 'item_done':
                 src = Path(item['src'])
-                iid = src.resolve().as_posix().lower()
+                iid = _cuma_11008_path_key(src)
                 try:
                     self.xteink_tree.set(iid, 'status', _cuma_fix_mojibake_text(item.get('status', 'OK')))
                     self.xteink_tree.set(iid, 'saida', _cuma_fix_mojibake_text(item.get('saida', '')))
@@ -9960,7 +9981,7 @@ def _cuma_1080_extend_translations() -> None:
 
 
 # =============================================================================
-# CUMA 1.081.2 - ARMAZENAMENTO LIMPO E CONFIGURAÇÕES CONSOLIDADAS
+# CUMA 1.081.3 - ARMAZENAMENTO LIMPO E CONFIGURAÇÕES CONSOLIDADAS
 # =============================================================================
 # Este bloco prepara a versão de lançamento para uma pasta mais limpa:
 # - dados graváveis do usuário em uma pasta própria;
@@ -10484,7 +10505,7 @@ def _cuma_version_write_public_files(state: dict) -> None:
     version_payload.update({
         'version': version,
         'updated_at': updated_at,
-        'build': 'storage_consolidation_1_081_2' if version == '1.081.2' else version_payload.get('build', 'cuma_release'),
+        'build': 'storage_consolidation_1_081_2' if version == '1.081.3' else version_payload.get('build', 'cuma_release'),
     })
     history_payload = {'base_version': CUMA_VERSION_BASE, 'current_version': version, 'events': events[-80:]}
     try:
@@ -10625,7 +10646,7 @@ def _cuma_install_storage_core_1081_2() -> None:
         _cuma_cleanup_legacy_runtime_files()
     except Exception as exc:
         try:
-            write_log(f'Instalação storage 1.081.2: {exc}')
+            write_log(f'Instalação storage 1.081.3: {exc}')
         except Exception:
             pass
 
@@ -12127,7 +12148,7 @@ _cuma_install_1081_1_release_patch()
 
 
 # =============================================================================
-# CUMA 1.081.2 - PACOTE LIMPO PARA RELEASE
+# CUMA 1.081.3 - PACOTE LIMPO PARA RELEASE
 # =============================================================================
 
 def _cuma_1081_2_manual_text() -> str:
@@ -12135,11 +12156,11 @@ def _cuma_1081_2_manual_text() -> str:
         base = _cuma_1081_1_manual_text()
     except Exception:
         base = f"""MANUAL COMPLETO DO CUMA - Conversor Ultimate de Mangás
-Versão: {globals().get('APP_DISPLAY_VERSION', '1.081.2')}
+Versão: {globals().get('APP_DISPLAY_VERSION', '1.081.3')}
 
 O CUMA limpa PDFs, exporta páginas/imagens e converte PDFs/EPUBs para formatos de leitura como EPUB e XTCH.
 """
-    version = globals().get('APP_DISPLAY_VERSION', '1.081.2')
+    version = globals().get('APP_DISPLAY_VERSION', '1.081.3')
     base = re.sub(r'Versão:\s*[0-9]+\.[0-9]+\.[0-9]+', f'Versão: {version}', base, count=1)
     old_files = """cuma.py
 Código principal do aplicativo.
@@ -12233,7 +12254,7 @@ Pasta de saída criada somente quando o usuário processa arquivos. Não deve vi
     base += f"""
 
 ===============================================================================
-ADENDO DA VERSÃO 1.081.2 - PACOTE MAIS LIMPO
+ADENDO DA VERSÃO 1.081.3 - PACOTE MAIS LIMPO
 ===============================================================================
 
 Esta versão consolida os arquivos JSON editáveis em um único arquivo de usuário:
@@ -12261,7 +12282,7 @@ def ensure_manual() -> Path:
         manual_path().write_text(_cuma_1081_2_manual_text(), encoding='utf-8')
     except Exception as exc:
         try:
-            _cuma_hotfix_log('Manual completo 1.081.2', exc)
+            _cuma_hotfix_log('Manual completo 1.081.3', exc)
         except Exception:
             pass
     return manual_path()
@@ -12270,7 +12291,7 @@ def ensure_manual() -> Path:
 def _cuma_1081_2_write_readme() -> None:
     try:
         readme = f"""CUMA - Conversor Ultimate de Mangás
-Versão: {globals().get('APP_DISPLAY_VERSION', '1.081.2')}
+Versão: {globals().get('APP_DISPLAY_VERSION', '1.081.3')}
 
 COMO USAR
 1. Extraia o ZIP inteiro.
@@ -12328,7 +12349,7 @@ def _cuma_1081_2_update_metadata(version: str) -> None:
         cuma_settings_save(data)
     except Exception as exc:
         try:
-            write_log(f'Metadados 1.081.2: {exc}')
+            write_log(f'Metadados 1.081.3: {exc}')
         except Exception:
             pass
 
@@ -12366,7 +12387,7 @@ def _cuma_install_1081_2_release_cleanup() -> None:
             pass
     except Exception as exc:
         try:
-            write_log(f'Instalação release cleanup 1.081.2: {exc}')
+            write_log(f'Instalação release cleanup 1.081.3: {exc}')
         except Exception:
             pass
 
@@ -12374,6 +12395,1626 @@ def _cuma_install_1081_2_release_cleanup() -> None:
 _cuma_install_1081_2_release_cleanup()
 
 
+
+
+# =============================================================================
+# CUMA 1.081.3 - ENDPOINT OFICIAL DE ATUALIZAÇÃO VIA GITHUB
+# =============================================================================
+# Este bloco mantém a versão 1.081.3 e apenas configura o botão "Procurar
+# atualizações" para consultar o manifesto oficial do repositório soldieg/CUMA.
+
+CUMA_DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json"
+CUMA_DEFAULT_UPDATE_DOWNLOAD_URL = "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip"
+CUMA_DEFAULT_UPDATE_SHA256 = ""
+CUMA_DEFAULT_UPDATE_SIZE_BYTES = 0
+
+
+def _cuma_update_version_tuple(value: str) -> tuple:
+    try:
+        parts = re.findall(r'\d+', str(value or ''))[:3]
+        nums = [int(x) for x in parts]
+        while len(nums) < 3:
+            nums.append(0)
+        return tuple(nums[:3])
+    except Exception:
+        return (0, 0, 0)
+
+
+def _cuma_update_manifest_url_from_settings() -> str:
+    try:
+        settings = cuma_settings_load()
+        if isinstance(settings, dict):
+            cfg = settings.get('config', {})
+            if isinstance(cfg, dict):
+                url = str(cfg.get('update_manifest_url', '') or '').strip()
+                if url:
+                    return url
+            updates = settings.get('updates', {})
+            if isinstance(updates, dict):
+                url = str(updates.get('manifest_url', '') or '').strip()
+                if url:
+                    return url
+    except Exception:
+        pass
+    return CUMA_DEFAULT_UPDATE_MANIFEST_URL
+
+
+def _cuma_ensure_update_settings_defaults() -> None:
+    try:
+        settings = cuma_settings_load()
+        if not isinstance(settings, dict):
+            settings = {}
+        cfg = settings.setdefault('config', {})
+        if isinstance(cfg, dict) and not str(cfg.get('update_manifest_url', '') or '').strip():
+            cfg['update_manifest_url'] = CUMA_DEFAULT_UPDATE_MANIFEST_URL
+        updates = settings.setdefault('updates', {})
+        if isinstance(updates, dict):
+            updates.setdefault('channel', 'stable')
+            updates.setdefault('manifest_url', CUMA_DEFAULT_UPDATE_MANIFEST_URL)
+            updates.setdefault('auto_download', False)
+            updates.setdefault('verify_sha256', True)
+            updates.setdefault('last_checked_at', '')
+            updates.setdefault('last_available_version', '')
+        cuma_settings_save(settings)
+    except Exception as exc:
+        try:
+            write_log(f'Configuração padrão de atualização GitHub: {exc}')
+        except Exception:
+            pass
+
+
+def _cuma_check_updates_button_async(self):
+    if getattr(self, '_update_manifest_check_running', False):
+        return
+    self._update_manifest_check_running = True
+    btn = getattr(self, 'update_btn', None)
+    try:
+        if btn is not None:
+            btn.configure(state='disabled')
+    except Exception:
+        pass
+
+    def finish(kind: str, title: str, message: str) -> None:
+        self._update_manifest_check_running = False
+        try:
+            if btn is not None:
+                btn.configure(state='normal')
+        except Exception:
+            pass
+        try:
+            text = _cuma_fix_mojibake_text(message) if '_cuma_fix_mojibake_text' in globals() else message
+        except Exception:
+            text = message
+        (messagebox.showerror if kind == 'error' else messagebox.showinfo)(title, text)
+
+    def worker():
+        try:
+            _cuma_ensure_update_settings_defaults()
+            manifest_url = _cuma_update_manifest_url_from_settings()
+            import urllib.request
+            req = urllib.request.Request(
+                manifest_url,
+                headers={'User-Agent': 'CUMA-Update-Checker/1.100.0'}
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                remote = json.loads(resp.read().decode('utf-8'))
+
+            if str(remote.get('app_id', 'cuma')).lower() != 'cuma':
+                raise ValueError('O manifesto remoto não parece ser do CUMA.')
+
+            latest = str(remote.get('version', '') or '').strip()
+            current = str(globals().get('APP_DISPLAY_VERSION', '1.081.3') or '1.081.3').strip()
+            download_url = str(remote.get('download_url', '') or CUMA_DEFAULT_UPDATE_DOWNLOAD_URL)
+            remote_sha = str(remote.get('sha256', '') or '').strip()
+            remote_size = int(remote.get('size_bytes', 0) or 0)
+            notes = remote.get('release_notes', [])
+            if isinstance(notes, list):
+                notes_text = '\n'.join(f'• {str(item)}' for item in notes[:8])
+            else:
+                notes_text = str(notes or '')
+
+            try:
+                settings = cuma_settings_load()
+                settings.setdefault('updates', {})
+                if isinstance(settings.get('updates'), dict):
+                    settings['updates']['last_checked_at'] = datetime.now().isoformat(timespec='seconds')
+                    settings['updates']['last_available_version'] = latest
+                cuma_settings_save(settings)
+            except Exception:
+                pass
+
+            latest_tuple = _cuma_update_version_tuple(latest)
+            current_tuple = _cuma_update_version_tuple(current)
+
+            if latest and latest_tuple > current_tuple:
+                msg = (
+                    f'Atualização encontrada: {latest}\n'
+                    f'Versão instalada: {current}\n\n'
+                    f'Baixe em:\n{download_url}\n\n'
+                    f'SHA256:\n{remote_sha or "não informado"}\n\n'
+                    f'Tamanho: {remote_size or "não informado"} bytes'
+                )
+                if notes_text:
+                    msg += f'\n\nNovidades:\n{notes_text}'
+            elif latest and latest_tuple == current_tuple:
+                msg = (
+                    f'Você já está usando a versão mais recente informada no repositório.\n\n'
+                    f'Versão instalada: {current}\n'
+                    f'Versão no GitHub: {latest}'
+                )
+            else:
+                msg = (
+                    f'O manifesto do GitHub está em uma versão anterior à instalada.\n\n'
+                    f'Versão instalada: {current}\n'
+                    f'Versão no GitHub: {latest or "não informada"}'
+                )
+
+            self.root.after(0, lambda: finish('info', 'Procurar atualizações', msg))
+        except Exception as exc:
+            try:
+                _cuma_patch_log_exception('Verificação de atualizações GitHub', exc)
+            except Exception:
+                try:
+                    write_log(f'Verificação de atualizações GitHub: {exc}')
+                except Exception:
+                    pass
+            self.root.after(0, lambda: finish('error', 'Procurar atualizações', friendly_error(exc)))
+
+    threading.Thread(target=worker, daemon=True, name='CUMA-Update-Checker').start()
+
+
+def _cuma_install_github_update_endpoint_1081_2() -> None:
+    try:
+        _cuma_ensure_update_settings_defaults()
+        globals()['_cuma_check_updates_button'] = _cuma_check_updates_button_async
+    except Exception as exc:
+        try:
+            write_log(f'Instalação do endpoint GitHub de atualização: {exc}')
+        except Exception:
+            pass
+
+
+_cuma_install_github_update_endpoint_1081_2()
+
+
+
+# =============================================================================
+# CUMA 1.081.3 - POP-UP DE ATUALIZAÇÕES INTEGRADO AO TEMA
+# =============================================================================
+# Substitui os messagebox nativos do Tk no botão "Procurar atualizações".
+# O objetivo é evitar janelas brancas/fora do visual do aplicativo e impedir
+# mensagens vazias como "None" quando algum erro não traz texto amigável.
+
+def _cuma_update_dialog_palette(app) -> dict:
+    try:
+        roles = app.current_role_colors() if hasattr(app, 'current_role_colors') else {}
+    except Exception:
+        roles = {}
+    try:
+        palette = getattr(app, '_theme_palette', {}) or {}
+    except Exception:
+        palette = {}
+    bg = roles.get('background') or palette.get('bg') or '#0B1020'
+    surface = roles.get('surface') or palette.get('surface') or '#111827'
+    surface2 = roles.get('surface2') or palette.get('surface2') or '#172033'
+    fg = roles.get('text') or palette.get('fg') or '#E5E7EB'
+    muted = palette.get('muted') or '#9CA3AF'
+    border = roles.get('border') or palette.get('border') or '#263244'
+    accent = roles.get('primary') or palette.get('accent') or '#3B82F6'
+    danger = roles.get('danger') or palette.get('danger') or '#EF4444'
+    success = palette.get('success') or '#22C55E'
+    drop = palette.get('drop') or surface2
+    return {
+        'bg': bg, 'surface': surface, 'surface2': surface2, 'fg': fg, 'muted': muted,
+        'border': border, 'accent': accent, 'danger': danger, 'success': success,
+        'drop': drop, 'button_fg': '#FFFFFF'
+    }
+
+
+def _cuma_update_safe_text(value, fallback='Não foi possível obter detalhes.') -> str:
+    try:
+        text_value = str(value or '').strip()
+    except Exception:
+        text_value = ''
+    if not text_value or text_value.lower() == 'none':
+        return fallback
+    try:
+        if '_cuma_fix_mojibake_text' in globals():
+            text_value = _cuma_fix_mojibake_text(text_value)
+    except Exception:
+        pass
+    return text_value
+
+
+def _cuma_update_human_size(size_bytes) -> str:
+    try:
+        n = int(size_bytes or 0)
+    except Exception:
+        n = 0
+    if n <= 0:
+        return 'não informado'
+    units = ['bytes', 'KB', 'MB', 'GB']
+    value = float(n)
+    unit = units[0]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            break
+        value /= 1024
+    if unit == 'bytes':
+        return f'{int(value)} bytes'
+    return f'{value:.1f} {unit} ({n} bytes)'
+
+
+def _cuma_copy_to_clipboard(root, text_value: str) -> None:
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(str(text_value or ''))
+        root.update_idletasks()
+    except Exception as exc:
+        try:
+            write_log(f'Falha ao copiar para área de transferência: {exc}')
+        except Exception:
+            pass
+
+
+def _cuma_show_themed_update_dialog(app, state='none', title='Procurar atualizações',
+                                    heading=None, message=None, details=None,
+                                    download_url='', sha256='', size_bytes=0,
+                                    release_notes='') -> None:
+    try:
+        pal = _cuma_update_dialog_palette(app)
+        root = app.root
+        top = tk.Toplevel(root)
+        top.title(title)
+        top.configure(bg=pal['bg'])
+        top.resizable(False, False)
+        try:
+            top.transient(root)
+            top.grab_set()
+        except Exception:
+            pass
+
+        width, height = 620, 460
+        try:
+            root.update_idletasks()
+            rx = root.winfo_rootx()
+            ry = root.winfo_rooty()
+            rw = root.winfo_width()
+            rh = root.winfo_height()
+            x = rx + max(0, (rw - width) // 2)
+            y = ry + max(0, (rh - height) // 2)
+            top.geometry(f'{width}x{height}+{x}+{y}')
+        except Exception:
+            top.geometry(f'{width}x{height}')
+
+        container = tk.Frame(top, bg=pal['surface'], bd=0, highlightthickness=1, highlightbackground=pal['border'])
+        container.pack(fill='both', expand=True, padx=1, pady=1)
+
+        accent_color = pal['accent']
+        icon_text = 'i'
+        if state == 'available':
+            accent_color = pal['accent']; icon_text = '↓'
+            heading = heading or 'Atualização disponível'
+        elif state == 'error':
+            accent_color = pal['danger']; icon_text = '!'
+            heading = heading or 'Não foi possível verificar atualizações'
+        else:
+            accent_color = pal['success']; icon_text = '✓'
+            heading = heading or 'Não há atualizações. Aguarde...'
+
+        top_bar = tk.Frame(container, bg=accent_color, height=4)
+        top_bar.pack(fill='x', side='top')
+        header = tk.Frame(container, bg=pal['surface'], padx=24, pady=22)
+        header.pack(fill='x')
+
+        icon = tk.Canvas(header, width=54, height=54, bg=pal['surface'], highlightthickness=0)
+        icon.pack(side='left', padx=(0, 16))
+        icon.create_oval(4, 4, 50, 50, fill=accent_color, outline=accent_color)
+        icon.create_text(27, 27, text=icon_text, fill=pal['button_fg'], font=('Segoe UI', 22, 'bold'))
+
+        title_box = tk.Frame(header, bg=pal['surface'])
+        title_box.pack(side='left', fill='x', expand=True)
+        tk.Label(title_box, text=_cuma_update_safe_text(heading, 'Procurar atualizações'),
+                 bg=pal['surface'], fg=pal['fg'], font=('Segoe UI', 14, 'bold'),
+                 anchor='w', justify='left').pack(fill='x', anchor='w')
+        sub = 'Verificação concluída pelo GitHub Releases.'
+        if state == 'available':
+            sub = 'Existe um pacote novo publicado para baixar.'
+        elif state == 'error':
+            sub = 'Confira sua conexão ou o manifesto de atualização.'
+        tk.Label(title_box, text=sub, bg=pal['surface'], fg=pal['muted'],
+                 font=('Segoe UI', 9), anchor='w', justify='left').pack(fill='x', anchor='w', pady=(4, 0))
+
+        body = tk.Frame(container, bg=pal['surface'], padx=24, pady=0)
+        body.pack(side='top', fill='both', expand=True)
+
+        msg = _cuma_update_safe_text(message, 'Nenhuma informação adicional foi recebida.')
+        msg_label = tk.Label(body, text=msg, bg=pal['surface'], fg=pal['fg'],
+                             font=('Segoe UI', 10), anchor='nw', justify='left',
+                             wraplength=560)
+        msg_label.pack(fill='x', anchor='w', pady=(0, 12))
+
+        info_box = tk.Frame(body, bg=pal['surface2'], highlightthickness=1, highlightbackground=pal['border'])
+        info_box.pack(fill='both', expand=True)
+
+        text_box = tk.Text(info_box, height=9, wrap='word', bg=pal['surface2'], fg=pal['fg'],
+                           insertbackground=pal['fg'], relief='flat', bd=0,
+                           font=('Segoe UI', 9), padx=12, pady=10)
+        text_box.pack(side='left', fill='both', expand=True)
+
+        scroll = tk.Scrollbar(info_box, orient='vertical', command=text_box.yview,
+                              bg=pal['surface2'], activebackground=pal['drop'],
+                              troughcolor=pal['bg'], relief='flat', bd=0)
+        scroll.pack(side='right', fill='y')
+        text_box.configure(yscrollcommand=scroll.set)
+
+        lines = []
+        if details:
+            lines.append(_cuma_update_safe_text(details, ''))
+        if download_url:
+            lines.append('')
+            lines.append('Link de download:')
+            lines.append(str(download_url))
+        if sha256:
+            lines.append('')
+            lines.append('SHA256:')
+            lines.append(str(sha256))
+        if size_bytes:
+            lines.append('')
+            lines.append('Tamanho:')
+            lines.append(_cuma_update_human_size(size_bytes))
+        if release_notes:
+            lines.append('')
+            lines.append('Novidades:')
+            lines.append(_cuma_update_safe_text(release_notes, ''))
+        text_box.insert('1.0', '\n'.join(lines).strip() or 'Sem detalhes extras.')
+        text_box.configure(state='disabled')
+
+        actions = tk.Frame(container, bg=pal['surface'], padx=24, pady=(16, 20))
+        # Mantém os botões sempre visíveis no rodapé da janela,
+        # mesmo quando as notas da atualização ocupam muito espaço.
+        actions.pack(side='bottom', fill='x')
+        try:
+            actions.lift()
+        except Exception:
+            pass
+
+        def make_button(text_label, command, primary=False):
+            bg = accent_color if primary else pal['surface2']
+            fg = pal['button_fg'] if primary else pal['fg']
+            active = pal['drop'] if not primary else pal['accent']
+            btn = tk.Button(actions, text=text_label, command=command, bg=bg, fg=fg,
+                            activebackground=active, activeforeground=fg,
+                            relief='flat', bd=0, padx=16, pady=9,
+                            font=('Segoe UI', 9, 'bold' if primary else 'normal'),
+                            cursor='hand2')
+            btn.pack(side='right', padx=(8, 0))
+            return btn
+
+        make_button('Fechar', top.destroy, primary=False)
+
+        if download_url:
+            def open_download():
+                try:
+                    import webbrowser
+                    webbrowser.open(download_url)
+                except Exception as exc:
+                    try:
+                        write_log(f'Falha ao abrir download: {exc}')
+                    except Exception:
+                        pass
+
+            make_button('Copiar link', lambda: _cuma_copy_to_clipboard(root, download_url), primary=False)
+            make_button('Abrir download', open_download, primary=True)
+        elif sha256:
+            make_button('Copiar SHA256', lambda: _cuma_copy_to_clipboard(root, sha256), primary=False)
+
+        try:
+            top.bind('<Escape>', lambda _e: top.destroy())
+            top.focus_force()
+        except Exception:
+            pass
+    except Exception as exc:
+        # Última defesa: nunca mostrar "None".
+        fallback = _cuma_update_safe_text(message or exc, 'Não foi possível verificar atualizações.')
+        try:
+            messagebox.showinfo(title or 'Procurar atualizações', fallback)
+        except Exception:
+            pass
+
+
+def _cuma_check_updates_button_async_1081_3(self):
+    if getattr(self, '_update_manifest_check_running', False):
+        return
+    self._update_manifest_check_running = True
+    btn = getattr(self, 'update_btn', None)
+    try:
+        if btn is not None:
+            btn.configure(state='disabled', text='Verificando...')
+    except Exception:
+        pass
+
+    def finish(payload: dict) -> None:
+        self._update_manifest_check_running = False
+        try:
+            if btn is not None:
+                btn.configure(state='normal', text='Procurar atualizações')
+        except Exception:
+            pass
+        try:
+            _cuma_show_themed_update_dialog(self, **payload)
+        except Exception as exc:
+            safe_message = _cuma_update_safe_text(payload.get('message') or exc, 'Não foi possível verificar atualizações.')
+            try:
+                messagebox.showinfo(payload.get('title', 'Procurar atualizações'), safe_message)
+            except Exception:
+                pass
+
+    def worker():
+        try:
+            _cuma_ensure_update_settings_defaults()
+            manifest_url = _cuma_update_manifest_url_from_settings()
+            import urllib.request
+            req = urllib.request.Request(
+                manifest_url,
+                headers={'User-Agent': 'CUMA-Update-Checker/1.100.0'}
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                remote = json.loads(resp.read().decode('utf-8'))
+
+            if str(remote.get('app_id', 'cuma')).lower() != 'cuma':
+                raise ValueError('O manifesto remoto não parece ser do CUMA.')
+
+            latest = str(remote.get('version', '') or '').strip()
+            current = str(globals().get('APP_DISPLAY_VERSION', '1.081.3') or '1.081.3').strip()
+            download_url = str(remote.get('download_url', '') or '').strip()
+            remote_sha = str(remote.get('sha256', '') or '').strip()
+            try:
+                remote_size = int(remote.get('size_bytes', 0) or 0)
+            except Exception:
+                remote_size = 0
+            notes = remote.get('release_notes', [])
+            if isinstance(notes, list):
+                notes_text = '\n'.join(f'• {str(item)}' for item in notes[:10])
+            else:
+                notes_text = str(notes or '')
+
+            try:
+                settings = cuma_settings_load()
+                settings.setdefault('updates', {})
+                if isinstance(settings.get('updates'), dict):
+                    settings['updates']['last_checked_at'] = datetime.now().isoformat(timespec='seconds')
+                    settings['updates']['last_available_version'] = latest
+                    settings['updates']['last_manifest_url'] = manifest_url
+                cuma_settings_save(settings)
+            except Exception:
+                pass
+
+            latest_tuple = _cuma_update_version_tuple(latest)
+            current_tuple = _cuma_update_version_tuple(current)
+
+            if latest and latest_tuple > current_tuple:
+                payload = {
+                    'state': 'available',
+                    'title': 'Atualização disponível',
+                    'heading': f'CUMA {latest} está disponível',
+                    'message': f'Você está usando a versão {current}. Baixe a nova versão pelo botão abaixo.',
+                    'details': f'Versão instalada: {current}\nVersão no GitHub: {latest}\nCanal: {remote.get("channel", "stable")}',
+                    'download_url': download_url or CUMA_DEFAULT_UPDATE_DOWNLOAD_URL,
+                    'sha256': remote_sha,
+                    'size_bytes': remote_size,
+                    'release_notes': notes_text,
+                }
+            else:
+                # Quando o manifesto está igual OU anterior à versão instalada, não assustar o usuário.
+                # Isso evita mensagens técnicas durante testes de builds locais mais novas que o stable.json.
+                payload = {
+                    'state': 'none',
+                    'title': 'Procurar atualizações',
+                    'heading': 'Não há atualizações. Aguarde...',
+                    'message': f'Você já está usando a versão mais recente disponível para este canal.',
+                    'details': f'Versão instalada: {current}\nVersão no GitHub: {latest or "não informada"}\nCanal: {remote.get("channel", "stable")}\nManifesto: {manifest_url}',
+                    'download_url': '',
+                    'sha256': remote_sha,
+                    'size_bytes': remote_size,
+                    'release_notes': notes_text,
+                }
+
+            self.root.after(0, lambda payload=payload: finish(payload))
+        except Exception as exc:
+            try:
+                _cuma_patch_log_exception('Verificação de atualizações GitHub', exc)
+            except Exception:
+                try:
+                    write_log(f'Verificação de atualizações GitHub: {exc}')
+                except Exception:
+                    pass
+            payload = {
+                'state': 'error',
+                'title': 'Procurar atualizações',
+                'heading': 'Não foi possível verificar atualizações',
+                'message': _cuma_update_safe_text(friendly_error(exc), 'Não foi possível verificar atualizações.'),
+                'details': f'Erro técnico: {type(exc).__name__}: {exc}',
+            }
+            self.root.after(0, lambda payload=payload: finish(payload))
+
+    threading.Thread(target=worker, daemon=True, name='CUMA-Update-Checker').start()
+
+
+def _cuma_install_themed_update_dialog_1081_3() -> None:
+    try:
+        globals()['_cuma_check_updates_button'] = _cuma_check_updates_button_async_1081_3
+    except Exception as exc:
+        try:
+            write_log(f'Instalação do pop-up de atualização 1.081.3: {exc}')
+        except Exception:
+            pass
+
+
+_cuma_install_themed_update_dialog_1081_3()
+
+
+# =============================================================================
+# CUMA 1.100.0 - PERFIS, LEITURA, OTIMIZAÇÃO E-INK E EXPERIÊNCIA AVANÇADA
+# =============================================================================
+# Consolida o roadmap planejado:
+# - 1.082.0: perfis reais de dispositivos, ordenação natural, leitura mangá/ocidental.
+# - 1.090.0: otimização E-ink, corte de margens, páginas duplas e presets de imagem.
+# - 1.100.0: preview antes/depois, metadados, arquivos compactados e webtoon básico.
+#
+# Observação de licença/referência: os perfis Kindle/Kobo/reMarkable abaixo foram
+# adaptados a partir da referência técnica do Kindle Comic Converter (KCC),
+# repositório https://github.com/ciromattia/kcc, licença ISC.
+
+CUMA_11000_UPDATE_ID = 'roadmap_kcc_full_consolidation_11000'
+CUMA_11000_VERSION = '1.100.0'
+
+CUMA_11000_KCC_DEVICE_PROFILES = {
+    'Kindle 1 (KCC)': {'width': 600, 'height': 670, 'dpi': 167, 'jpeg_quality': 92, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.08, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle 2 (KCC)': {'width': 600, 'height': 670, 'dpi': 167, 'jpeg_quality': 92, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.08, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle DX/DXG (KCC)': {'width': 824, 'height': 1000, 'dpi': 150, 'jpeg_quality': 92, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.08, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Keyboard/Touch (KCC)': {'width': 600, 'height': 800, 'dpi': 167, 'jpeg_quality': 92, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.08, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle 5/7/8/10 (KCC)': {'width': 600, 'height': 800, 'dpi': 167, 'jpeg_quality': 92, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.08, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Paperwhite 1/2 (KCC)': {'width': 758, 'height': 1024, 'dpi': 212, 'jpeg_quality': 94, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Voyage (KCC)': {'width': 1072, 'height': 1448, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Paperwhite 3/4/Oasis (KCC)': {'width': 1072, 'height': 1448, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Oasis 2/3 (KCC)': {'width': 1264, 'height': 1680, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle 11 (KCC)': {'width': 1072, 'height': 1448, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Paperwhite 5/Signature (KCC)': {'width': 1236, 'height': 1648, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Paperwhite 6 (KCC)': {'width': 1272, 'height': 1696, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Scribe 1/2 (KCC)': {'width': 1860, 'height': 2480, 'dpi': 300, 'jpeg_quality': 96, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.06, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Colorsoft (KCC)': {'width': 1272, 'height': 1696, 'dpi': 300, 'jpeg_quality': 96, 'gamma': 1.0, 'contrast': 1.04, 'sharpen': 0.06, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kindle Scribe 3/Colorsoft (KCC)': {'width': 1986, 'height': 2648, 'dpi': 300, 'jpeg_quality': 96, 'gamma': 1.0, 'contrast': 1.05, 'sharpen': 0.06, 'margin': 0, 'category': 'Kindle', 'source': 'KCC/ISC'},
+    'Kobo Mini/Touch (KCC)': {'width': 600, 'height': 800, 'dpi': 167, 'jpeg_quality': 92, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.08, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Glo/Aura/Nia (KCC)': {'width': 758, 'height': 1024, 'dpi': 212, 'jpeg_quality': 94, 'gamma': 1.0, 'contrast': 1.07, 'sharpen': 0.09, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Glo HD/Clara/Clara 2E (KCC)': {'width': 1072, 'height': 1448, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Clara Colour (KCC)': {'width': 1072, 'height': 1448, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.04, 'sharpen': 0.06, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Libra/Libra 2 (KCC)': {'width': 1264, 'height': 1680, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.08, 'sharpen': 0.10, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Libra Colour (KCC)': {'width': 1264, 'height': 1680, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.04, 'sharpen': 0.06, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Aura ONE/Elipsa (KCC)': {'width': 1404, 'height': 1872, 'dpi': 227, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.06, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'Kobo Forma/Sage (KCC)': {'width': 1440, 'height': 1920, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.06, 'sharpen': 0.06, 'margin': 0, 'category': 'Kobo', 'source': 'KCC/ISC'},
+    'reMarkable 1/2 (KCC)': {'width': 1404, 'height': 1872, 'dpi': 226, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.05, 'sharpen': 0.04, 'margin': 0, 'category': 'reMarkable', 'source': 'KCC/ISC'},
+    'reMarkable Paper Pro (KCC)': {'width': 1620, 'height': 2160, 'dpi': 229, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.05, 'sharpen': 0.04, 'margin': 0, 'category': 'reMarkable', 'source': 'KCC/ISC'},
+    'reMarkable Paper Pro Move (KCC)': {'width': 954, 'height': 1696, 'dpi': 264, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.05, 'sharpen': 0.04, 'margin': 0, 'category': 'reMarkable', 'source': 'KCC/ISC'},
+}
+
+CUMA_11000_PROCESSING_DEFAULTS = {
+    'reading_order': 'Ocidental',
+    'auto_crop': False,
+    'auto_crop_strength': 'Normal',
+    'remove_page_numbers': False,
+    'split_double_pages': False,
+    'split_keep_original': False,
+    'webtoon_split': False,
+    'webtoon_max_ratio': 2.8,
+    'image_preset': 'Original',
+    'cbz_zip_input': True,
+    'rar_7z_input': True,
+    'metadata': {'title': '', 'creator': '', 'series': '', 'volume': '', 'language': 'pt-BR', 'description': ''},
+}
+CUMA_11000_IMAGE_PRESETS = ('Original', 'Mangá preto e branco', 'E-reader contraste alto', 'E-reader cinza suave', 'Colorido preservado', 'Arquivo menor', 'Alta qualidade')
+CUMA_11000_READING_ORDERS = ('Ocidental', 'Mangá')
+CUMA_11000_CROP_STRENGTHS = ('Suave', 'Normal', 'Forte')
+CUMA_11000_ARCHIVE_EXTS = ('.cbz', '.zip', '.cbr', '.rar', '.7z')
+
+
+def _cuma_11000_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        msg = str(context)
+        if exc is not None:
+            msg += f': {type(exc).__name__}: {exc}'
+        write_log(msg)
+    except Exception:
+        pass
+
+
+def _cuma_11000_deep_merge(base, overlay):
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        out = dict(base)
+        for k, v in overlay.items():
+            out[k] = _cuma_11000_deep_merge(out.get(k), v) if k in out else v
+        return out
+    return overlay if overlay is not None else base
+
+
+def _cuma_11000_processing_settings() -> dict:
+    try:
+        data = cuma_settings_section('advanced_processing', {})
+        if not isinstance(data, dict):
+            data = {}
+        return _cuma_11000_deep_merge(CUMA_11000_PROCESSING_DEFAULTS, data)
+    except Exception:
+        return dict(CUMA_11000_PROCESSING_DEFAULTS)
+
+
+def _cuma_11000_save_processing_settings(data: dict) -> None:
+    try:
+        cuma_settings_set_section('advanced_processing', _cuma_11000_deep_merge(CUMA_11000_PROCESSING_DEFAULTS, data if isinstance(data, dict) else {}))
+    except Exception as exc:
+        _cuma_11000_log('Falha ao salvar configurações avançadas 1.100.0', exc)
+
+
+def _cuma_11000_natural_key(value) -> list:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\d+)', str(value))]
+
+
+def _cuma_11000_profile_sort_key(name: str) -> tuple:
+    text = str(name)
+    order = ('XTEINK', 'Kindle', 'Kobo', 'reMarkable', 'BOOX', 'PocketBook', 'Smartphone', 'Tablet', 'Personalizado')
+    idx = 99
+    for i, prefix in enumerate(order):
+        if text.startswith(prefix):
+            idx = i
+            break
+    return (idx, text.lower())
+
+
+def _cuma_11000_default_device_profiles() -> dict:
+    try:
+        prev_defaults = _CUMA_11000_RUNTIME.get('default_profiles')
+        data = prev_defaults() if callable(prev_defaults) else {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    for k, v in CUMA_11000_KCC_DEVICE_PROFILES.items():
+        data.setdefault(k, dict(v))
+    data.setdefault('Tablet 8" genérico', {'width': 1200, 'height': 1920, 'dpi': 280, 'jpeg_quality': 94, 'gamma': 1.0, 'contrast': 1.03, 'sharpen': 0.04, 'margin': 0, 'category': 'Tablet'})
+    data.setdefault('Tablet 10" genérico', {'width': 1600, 'height': 2560, 'dpi': 300, 'jpeg_quality': 95, 'gamma': 1.0, 'contrast': 1.02, 'sharpen': 0.03, 'margin': 0, 'category': 'Tablet'})
+    return data
+
+
+def _cuma_11000_device_profiles() -> dict:
+    try:
+        data = _CUMA_11000_RUNTIME.get('device_profiles')()
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    for k, v in _cuma_11000_default_device_profiles().items():
+        data.setdefault(k, dict(v))
+    return data
+
+
+def _cuma_11000_refresh_device_globals() -> None:
+    try:
+        data = _cuma_11000_device_profiles()
+        globals()['XTEINK_DEVICE_PROFILES'] = {k: (int(v.get('width', 600)), int(v.get('height', 800))) for k, v in data.items() if isinstance(v, dict)}
+        globals()['XTEINK_DEVICES'] = tuple(sorted(globals()['XTEINK_DEVICE_PROFILES'].keys(), key=_cuma_11000_profile_sort_key))
+    except Exception as exc:
+        _cuma_11000_log('Falha ao atualizar perfis 1.100.0', exc)
+
+
+def _cuma_11000_safe_bool_var(var, default=False) -> bool:
+    try:
+        return bool(var.get())
+    except Exception:
+        return bool(default)
+
+
+def _cuma_11000_safe_str_var(var, default='') -> str:
+    try:
+        return str(var.get())
+    except Exception:
+        return str(default)
+
+
+def _cuma_11000_app_processing_settings(self=None) -> dict:
+    data = _cuma_11000_processing_settings()
+    if self is not None:
+        try:
+            data['reading_order'] = _cuma_11000_safe_str_var(getattr(self, 'cuma_reading_order', None), data.get('reading_order', 'Ocidental'))
+            data['auto_crop'] = _cuma_11000_safe_bool_var(getattr(self, 'cuma_auto_crop', None), data.get('auto_crop', False))
+            data['auto_crop_strength'] = _cuma_11000_safe_str_var(getattr(self, 'cuma_auto_crop_strength', None), data.get('auto_crop_strength', 'Normal'))
+            data['remove_page_numbers'] = _cuma_11000_safe_bool_var(getattr(self, 'cuma_remove_page_numbers', None), data.get('remove_page_numbers', False))
+            data['split_double_pages'] = _cuma_11000_safe_bool_var(getattr(self, 'cuma_split_double_pages', None), data.get('split_double_pages', False))
+            data['split_keep_original'] = _cuma_11000_safe_bool_var(getattr(self, 'cuma_split_keep_original', None), data.get('split_keep_original', False))
+            data['webtoon_split'] = _cuma_11000_safe_bool_var(getattr(self, 'cuma_webtoon_split', None), data.get('webtoon_split', False))
+            data['image_preset'] = _cuma_11000_safe_str_var(getattr(self, 'cuma_image_preset', None), data.get('image_preset', 'Original'))
+        except Exception:
+            pass
+    return data
+
+
+def _cuma_11000_set_processing_from_app(self) -> None:
+    _cuma_11000_save_processing_settings(_cuma_11000_app_processing_settings(self))
+
+
+def _cuma_11000_find_content_bbox(img: Image.Image, strength='Normal'):
+    try:
+        arr = np.asarray(img.convert('L'))
+        if arr.size == 0:
+            return None
+        if strength == 'Suave':
+            white_delta, black_delta, min_ratio = 18, 18, 0.003
+        elif strength == 'Forte':
+            white_delta, black_delta, min_ratio = 8, 8, 0.001
+        else:
+            white_delta, black_delta, min_ratio = 12, 12, 0.002
+        edges = np.concatenate([arr[:5, :].ravel(), arr[-5:, :].ravel(), arr[:, :5].ravel(), arr[:, -5:].ravel()])
+        bg = float(np.median(edges)) if edges.size else 255.0
+        mask = arr < max(0, bg - white_delta) if bg >= 128 else arr > min(255, bg + black_delta)
+        if float(mask.mean()) < min_ratio:
+            return None
+        ys, xs = np.where(mask)
+        if len(xs) == 0 or len(ys) == 0:
+            return None
+        left, right = int(xs.min()), int(xs.max()) + 1
+        top, bottom = int(ys.min()), int(ys.max()) + 1
+        if (right - left) < img.width * 0.30 or (bottom - top) < img.height * 0.30:
+            return None
+        pad = 6 if strength == 'Forte' else 12 if strength == 'Normal' else 20
+        left = max(0, left - pad); top = max(0, top - pad)
+        right = min(img.width, right + pad); bottom = min(img.height, bottom + pad)
+        if (right - left) >= img.width * 0.985 and (bottom - top) >= img.height * 0.985:
+            return None
+        return (left, top, right, bottom)
+    except Exception as exc:
+        _cuma_11000_log('Corte automático ignorado', exc)
+        return None
+
+
+def _cuma_11000_crop_margins(img: Image.Image, settings: dict) -> Image.Image:
+    if not settings.get('auto_crop'):
+        return img
+    bbox = _cuma_11000_find_content_bbox(img, settings.get('auto_crop_strength', 'Normal'))
+    if not bbox:
+        return img
+    try:
+        return img.crop(bbox)
+    except Exception:
+        return img
+
+
+def _cuma_11000_remove_page_number_area(img: Image.Image, settings: dict) -> Image.Image:
+    if not settings.get('remove_page_numbers'):
+        return img
+    try:
+        cut = int(img.height * 0.965)
+        if cut > img.height * 0.80:
+            return img.crop((0, 0, img.width, cut))
+    except Exception:
+        pass
+    return img
+
+
+def _cuma_11000_split_double_page(img: Image.Image, settings: dict) -> list[Image.Image]:
+    if not settings.get('split_double_pages'):
+        return [img]
+    try:
+        ratio = img.width / max(1, img.height)
+        if ratio < 1.22:
+            return [img]
+        mid = img.width // 2
+        left = img.crop((0, 0, mid, img.height))
+        right = img.crop((mid, 0, img.width, img.height))
+        pages = [right, left] if str(settings.get('reading_order', 'Ocidental')).lower().startswith('mang') else [left, right]
+        if settings.get('split_keep_original'):
+            return [img] + pages
+        try:
+            img.close()
+        except Exception:
+            pass
+        return pages
+    except Exception as exc:
+        _cuma_11000_log('Divisão de página dupla ignorada', exc)
+        return [img]
+
+
+def _cuma_11000_split_webtoon(img: Image.Image, settings: dict) -> list[Image.Image]:
+    if not settings.get('webtoon_split'):
+        return [img]
+    try:
+        max_ratio = float(settings.get('webtoon_max_ratio', 2.8) or 2.8)
+        if img.height / max(1, img.width) <= max_ratio:
+            return [img]
+        segment_h = int(max(400, min(img.width * 2, img.height)))
+        out = []
+        y = 0
+        while y < img.height:
+            bottom = min(img.height, y + segment_h)
+            out.append(img.crop((0, y, img.width, bottom)))
+            y = bottom
+        try:
+            img.close()
+        except Exception:
+            pass
+        return out or [img]
+    except Exception as exc:
+        _cuma_11000_log('Divisão webtoon ignorada', exc)
+        return [img]
+
+
+def _cuma_11000_apply_image_preset(img: Image.Image, settings: dict) -> Image.Image:
+    preset = str(settings.get('image_preset') or 'Original')
+    try:
+        from PIL import ImageEnhance, ImageOps
+        im = img.convert('RGB')
+        if preset == 'Original':
+            return im
+        if preset == 'Colorido preservado':
+            im = ImageEnhance.Contrast(im).enhance(1.04)
+            im = ImageEnhance.Sharpness(im).enhance(1.05)
+            return im
+        if preset == 'Arquivo menor':
+            im = im.convert('L')
+            im = ImageEnhance.Contrast(im).enhance(1.08)
+            return im.convert('RGB')
+        if preset == 'Alta qualidade':
+            im = ImageEnhance.Contrast(im).enhance(1.06)
+            im = ImageEnhance.Sharpness(im).enhance(1.18)
+            return im
+        gray = im.convert('L')
+        if preset == 'Mangá preto e branco':
+            gray = ImageOps.autocontrast(gray, cutoff=1)
+            gray = ImageEnhance.Contrast(gray).enhance(1.35)
+            gray = gray.point(lambda p: 255 if p > 205 else 0 if p < 65 else p)
+            return gray.convert('RGB')
+        if preset == 'E-reader contraste alto':
+            gray = ImageOps.autocontrast(gray, cutoff=1)
+            gray = ImageEnhance.Contrast(gray).enhance(1.28)
+            gray = ImageEnhance.Sharpness(gray).enhance(1.15)
+            return gray.convert('RGB')
+        if preset == 'E-reader cinza suave':
+            gray = ImageOps.autocontrast(gray, cutoff=0.5)
+            gray = ImageEnhance.Contrast(gray).enhance(1.10)
+            return gray.convert('RGB')
+        return im
+    except Exception as exc:
+        _cuma_11000_log('Preset de imagem ignorado', exc)
+        return img.convert('RGB')
+
+
+def _cuma_11000_process_source_image(img: Image.Image, target: Optional[tuple[int, int]], settings: dict):
+    try:
+        base = img.convert('RGB')
+    except Exception:
+        base = img
+    base = _cuma_11000_crop_margins(base, settings)
+    base = _cuma_11000_remove_page_number_area(base, settings)
+    base = _cuma_11000_crop_margins(base, settings)
+    pages = []
+    for part in _cuma_11000_split_double_page(base, settings):
+        for segment in _cuma_11000_split_webtoon(part, settings):
+            processed = _cuma_11000_apply_image_preset(segment, settings)
+            fitted = fit_to_target(processed, target) if target else processed
+            pages.append(fitted)
+            try:
+                if processed is not fitted:
+                    processed.close()
+            except Exception:
+                pass
+            try:
+                if segment is not processed and segment is not fitted:
+                    segment.close()
+            except Exception:
+                pass
+    return pages
+
+
+def _cuma_11000_iter_pdf_pages_as_images(pdf_path: Path, target: Optional[tuple[int, int]] = None, quality_zoom: float = 2.0):
+    settings = _cuma_11000_processing_settings()
+    doc = fitz.open(str(pdf_path))
+    try:
+        for page in doc:
+            if target:
+                zoom = max(target[0] / max(page.rect.width, 1), target[1] / max(page.rect.height, 1)) * 1.35
+            else:
+                zoom = quality_zoom
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            im = Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+            try:
+                for processed in _cuma_11000_process_source_image(im, target, settings):
+                    yield processed
+            finally:
+                try:
+                    im.close()
+                except Exception:
+                    pass
+    finally:
+        doc.close()
+
+
+def _cuma_11000_archive_image_names(zf: zipfile.ZipFile) -> list[str]:
+    names = []
+    for n in zf.namelist():
+        suffix = Path(n).suffix.lower()
+        if suffix in SUPPORTED_IMAGE_EXT and not n.endswith('/'):
+            names.append(n)
+    return sorted(names, key=_cuma_11000_natural_key)
+
+
+def _cuma_11000_extract_with_7z(archive_path: Path, tmp_dir: Path) -> list[Path]:
+    exe = shutil.which('7z') or shutil.which('7za') or shutil.which('7zr')
+    if not exe:
+        raise RuntimeError('Arquivos CBR/RAR/7Z precisam do 7-Zip instalado e disponível no PATH. CBZ/ZIP funciona nativamente.')
+    cmd = [exe, 'x', '-y', f'-o{str(tmp_dir)}', str(archive_path)]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or 'Falha ao extrair arquivo compactado com 7-Zip.').strip())
+    files = [p for p in tmp_dir.rglob('*') if p.suffix.lower() in SUPPORTED_IMAGE_EXT and p.is_file()]
+    return sorted(files, key=lambda p: _cuma_11000_natural_key(p.as_posix()))
+
+
+def _cuma_11000_iter_archive_images(archive_path: Path, target: Optional[tuple[int, int]] = None):
+    settings = _cuma_11000_processing_settings()
+    suffix = archive_path.suffix.lower()
+    if suffix in ('.zip', '.cbz'):
+        with zipfile.ZipFile(archive_path, 'r') as z:
+            for name in _cuma_11000_archive_image_names(z):
+                try:
+                    with z.open(name) as f:
+                        data = BytesIO(f.read())
+                    im = Image.open(data).convert('RGB')
+                    try:
+                        if im.width < 80 or im.height < 80:
+                            continue
+                        for processed in _cuma_11000_process_source_image(im, target, settings):
+                            yield processed
+                    finally:
+                        try:
+                            im.close()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    _cuma_11000_log(f'Imagem ignorada no compactado: {name}', exc)
+    elif suffix in ('.cbr', '.rar', '.7z'):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='cuma_archive_') as td:
+            files = _cuma_11000_extract_with_7z(archive_path, Path(td))
+            for p in files:
+                try:
+                    with Image.open(p) as im:
+                        im = im.convert('RGB')
+                        if im.width < 80 or im.height < 80:
+                            continue
+                        for processed in _cuma_11000_process_source_image(im, target, settings):
+                            yield processed
+                except Exception as exc:
+                    _cuma_11000_log(f'Imagem ignorada no compactado: {p.name}', exc)
+    else:
+        raise RuntimeError('Arquivo compactado não suportado. Use CBZ, ZIP, CBR, RAR ou 7Z.')
+
+
+def _cuma_11000_iter_epub_images(epub_path: Path, target: tuple[int, int]):
+    if not epub_path.exists():
+        raise RuntimeError('EPUB não encontrado.')
+    settings = _cuma_11000_processing_settings()
+    with zipfile.ZipFile(epub_path, 'r') as z:
+        names = sorted([n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT], key=_cuma_11000_natural_key)
+        for name in names:
+            try:
+                with z.open(name) as f:
+                    data = BytesIO(f.read())
+                im = Image.open(data).convert('RGB')
+                try:
+                    if im.width < 80 or im.height < 80:
+                        continue
+                    for processed in _cuma_11000_process_source_image(im, target, settings):
+                        yield processed
+                finally:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                _cuma_11000_log(f'Imagem ignorada no EPUB: {name}', exc)
+
+
+def _cuma_11000_extract_epub_images(epub_path: Path, target: tuple[int, int]) -> list[Image.Image]:
+    images = list(_cuma_11000_iter_epub_images(epub_path, target))
+    if not images:
+        raise RuntimeError('Não encontrei imagens úteis dentro do EPUB. EPUB textual puro ainda não é renderizado nativamente.')
+    return images
+
+
+def _cuma_11000_epub_metadata(title: str) -> dict:
+    settings = _cuma_11000_processing_settings()
+    meta = settings.get('metadata', {}) if isinstance(settings.get('metadata'), dict) else {}
+    return {
+        'title': str(meta.get('title') or title or 'CUMA'),
+        'creator': str(meta.get('creator') or ''),
+        'series': str(meta.get('series') or ''),
+        'volume': str(meta.get('volume') or ''),
+        'language': str(meta.get('language') or 'pt-BR'),
+        'description': str(meta.get('description') or ''),
+    }
+
+
+def _cuma_11000_epub_opf_metadata(meta: dict, uid: str) -> str:
+    title = html.escape(meta.get('title') or 'CUMA')
+    lang = html.escape(meta.get('language') or 'pt-BR')
+    creator = html.escape(meta.get('creator') or '')
+    desc = html.escape(meta.get('description') or '')
+    series = html.escape(meta.get('series') or '')
+    volume = html.escape(meta.get('volume') or '')
+    extra = ''
+    if creator:
+        extra += f'<dc:creator>{creator}</dc:creator>'
+    if desc:
+        extra += f'<dc:description>{desc}</dc:description>'
+    if series:
+        extra += f'<meta property="belongs-to-collection">{series}</meta><meta property="collection-type">series</meta>'
+    if volume:
+        extra += f'<meta property="group-position">{volume}</meta>'
+    return f'<dc:identifier id="uid">{uid}</dc:identifier><dc:title>{title}</dc:title><dc:language>{lang}</dc:language>{extra}'
+
+
+def _cuma_11000_create_image_epub_from_iter(image_iter, output_epub: Path, title: str, quality: int = 92) -> None:
+    output_epub.parent.mkdir(parents=True, exist_ok=True)
+    uid = str(uuid.uuid4())
+    manifest = []
+    spine = []
+    nav = []
+    meta = _cuma_11000_epub_metadata(title)
+    with zipfile.ZipFile(output_epub, 'w') as z:
+        z.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+        z.writestr('META-INF/container.xml', '''<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>''')
+        count = 0
+        for count, im in enumerate(image_iter, 1):
+            try:
+                img_name = f'images/page_{count:04d}.jpg'
+                html_name = f'page_{count:04d}.xhtml'
+                bio = BytesIO()
+                q = int(max(50, min(100, quality or 92)))
+                im.convert('RGB').save(bio, format='JPEG', quality=q, optimize=True)
+                z.writestr('OEBPS/' + img_name, bio.getvalue(), compress_type=zipfile.ZIP_DEFLATED)
+                z.writestr('OEBPS/' + html_name, f'''<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Página {count}</title><style>html,body{{margin:0;padding:0;background:white;}} img{{width:100%;height:100%;object-fit:contain;display:block;}}</style></head><body><img src="{img_name}" alt="Página {count}"/></body></html>''', compress_type=zipfile.ZIP_DEFLATED)
+                manifest.append(f'<item id="p{count}" href="{html_name}" media-type="application/xhtml+xml"/>')
+                manifest.append(f'<item id="img{count}" href="{img_name}" media-type="image/jpeg"/>')
+                spine.append(f'<itemref idref="p{count}"/>')
+                nav.append(f'<li><a href="{html_name}">Página {count}</a></li>')
+            finally:
+                try:
+                    im.close()
+                except Exception:
+                    pass
+        if count <= 0:
+            raise RuntimeError('Nenhuma imagem para criar EPUB.')
+        z.writestr('OEBPS/nav.xhtml', f'''<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Sumário</title></head><body><nav epub:type="toc"><ol>{''.join(nav)}</ol></nav></body></html>''', compress_type=zipfile.ZIP_DEFLATED)
+        z.writestr('OEBPS/content.opf', f'''<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">{_cuma_11000_epub_opf_metadata(meta, uid)}</metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>{''.join(manifest)}</manifest><spine>{''.join(spine)}</spine></package>''', compress_type=zipfile.ZIP_DEFLATED)
+
+
+def _cuma_11000_create_image_epub(images: list[Image.Image], output_epub: Path, title: str, quality: int = 92) -> None:
+    if not images:
+        raise RuntimeError('Nenhuma imagem para criar EPUB.')
+    return _cuma_11000_create_image_epub_from_iter(iter(images), output_epub, title, quality)
+
+
+def _cuma_11000_create_image_epub_from_pdf(pdf_path: Path, output_epub: Path, title: str, target: Optional[tuple[int, int]] = None, quality: int = 92) -> None:
+    return _cuma_11000_create_image_epub_from_iter(_cuma_11000_iter_pdf_pages_as_images(pdf_path, target=target), output_epub, title, quality)
+
+
+def _cuma_11000_create_epub_from_archive(archive_path: Path, output_epub: Path, title: str, target: Optional[tuple[int, int]] = None, quality: int = 92) -> None:
+    return _cuma_11000_create_image_epub_from_iter(_cuma_11000_iter_archive_images(archive_path, target=target), output_epub, title, quality)
+
+
+def _cuma_11000_create_xtch_from_archive(archive_path: Path, output_xtch: Path, title: str, target: tuple[int, int]) -> None:
+    images = list(_cuma_11000_iter_archive_images(archive_path, target=target))
+    try:
+        return create_xtch_from_images(images, output_xtch, title, target)
+    finally:
+        for im in images:
+            try:
+                im.close()
+            except Exception:
+                pass
+
+
+def _cuma_11000_run_xteink_job(src: Path, out_dir: Path, target: tuple[int, int], quality: int, flags: dict) -> list[Path]:
+    outputs = []
+    src = Path(src)
+    suffix = src.suffix.lower()
+    if suffix == '.pdf' and (flags.get('pdf_epub') or flags.get('pdf_xtch')):
+        if flags.get('pdf_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_image_epub_from_pdf(src, out, src.stem, target=target, quality=quality)
+            outputs.append(out)
+        if flags.get('pdf_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            create_xtch_from_pdf(src, out, src.stem, target)
+            outputs.append(out)
+    elif suffix == '.epub' and flags.get('epub_xtch'):
+        out = unique_path(out_dir / f'{src.stem}.xtch')
+        create_xtch_from_epub(src, out, src.stem, target)
+        outputs.append(out)
+    elif suffix in CUMA_11000_ARCHIVE_EXTS and (flags.get('pdf_epub') or flags.get('pdf_xtch')):
+        if flags.get('pdf_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_epub_from_archive(src, out, src.stem, target=target, quality=quality)
+            outputs.append(out)
+        if flags.get('pdf_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_archive(src, out, src.stem, target)
+            outputs.append(out)
+    else:
+        raise RuntimeError('Formato/combinação de conversão não suportado. Use PDF, EPUB, CBZ/ZIP ou CBR/RAR/7Z com 7-Zip instalado.')
+    return outputs
+
+
+def _cuma_11000_first_source_image(path: Path, target: Optional[tuple[int, int]] = None):
+    suffix = Path(path).suffix.lower()
+    if suffix == '.pdf':
+        doc = fitz.open(str(path))
+        try:
+            if len(doc) <= 0:
+                return None
+            page = doc[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+            return Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+        finally:
+            doc.close()
+    if suffix == '.epub':
+        with zipfile.ZipFile(path, 'r') as z:
+            names = sorted([n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT], key=_cuma_11000_natural_key)
+            if not names:
+                return None
+            with z.open(names[0]) as f:
+                return Image.open(BytesIO(f.read())).convert('RGB')
+    if suffix in CUMA_11000_ARCHIVE_EXTS:
+        it = _cuma_11000_iter_archive_images(path, target=None)
+        try:
+            return next(it)
+        except StopIteration:
+            return None
+    if suffix in SUPPORTED_IMAGE_EXT:
+        return Image.open(path).convert('RGB')
+    return None
+
+
+def _cuma_11000_photo_for_preview(img: Image.Image, max_w=420, max_h=520):
+    copy = img.copy().convert('RGB')
+    copy.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+    return ImageTk.PhotoImage(copy)
+
+
+def _cuma_11000_open_before_after_preview(self) -> None:
+    try:
+        selected = []
+        try:
+            if hasattr(self, 'xteink_tree') and self.xteink_tree.selection():
+                selected = [p for p in getattr(self, 'xteink_files', []) if _cuma_11008_path_key(p) in set(self.xteink_tree.selection())]
+        except Exception:
+            pass
+        if not selected:
+            try:
+                selected = self.xteink_selected_paths()
+            except Exception:
+                selected = []
+        if not selected:
+            messagebox.showinfo('Prévia antes/depois', 'Selecione um item na aba Converter.')
+            return
+        src = Path(selected[0])
+        original = _cuma_11000_first_source_image(src, target=None)
+        if original is None:
+            messagebox.showwarning('Prévia antes/depois', 'Não consegui abrir uma imagem de prévia para este arquivo.')
+            return
+        settings = _cuma_11000_app_processing_settings(self)
+        target = self.xteink_target() if hasattr(self, 'xteink_target') else None
+        processed_pages = _cuma_11000_process_source_image(original.copy(), target, settings)
+        processed = processed_pages[0] if processed_pages else original.copy()
+        top = tk.Toplevel(self.root)
+        top.title('Prévia antes/depois - CUMA 1.100.0')
+        top.geometry('980x680')
+        try:
+            pal = getattr(self, '_theme_palette', {}) or {}
+            top.configure(bg=pal.get('bg', '#0F1318'))
+        except Exception:
+            pass
+        wrap = ttk.Frame(top, style='Card.TFrame', padding=14)
+        wrap.pack(fill='both', expand=True)
+        ttk.Label(wrap, text='Prévia antes/depois', style='TitleSmall.TLabel').pack(anchor='w', pady=(0, 6))
+        ttk.Label(wrap, text=f'{src.name}  •  Preset: {settings.get("image_preset")}  •  Leitura: {settings.get("reading_order")}', style='Muted.TLabel').pack(anchor='w', pady=(0, 12))
+        grid = ttk.Frame(wrap, style='Card.TFrame')
+        grid.pack(fill='both', expand=True)
+        left = ttk.Frame(grid, style='Card.TFrame'); right = ttk.Frame(grid, style='Card.TFrame')
+        left.pack(side='left', fill='both', expand=True, padx=(0, 8)); right.pack(side='left', fill='both', expand=True, padx=(8, 0))
+        ttk.Label(left, text='Original', style='Strong.TLabel').pack(anchor='center')
+        ttk.Label(right, text='Processado', style='Strong.TLabel').pack(anchor='center')
+        photo1 = _cuma_11000_photo_for_preview(original); photo2 = _cuma_11000_photo_for_preview(processed)
+        lbl1 = ttk.Label(left, image=photo1); lbl2 = ttk.Label(right, image=photo2)
+        lbl1.image = photo1; lbl2.image = photo2
+        lbl1.pack(expand=True, pady=8); lbl2.pack(expand=True, pady=8)
+        ttk.Label(wrap, text='Ative/desative corte, páginas duplas, webtoon e presets para comparar antes de converter o arquivo inteiro.', style='Muted.TLabel', wraplength=900, justify='left').pack(anchor='w', pady=(10, 0))
+        ttk.Button(wrap, text='Fechar', command=top.destroy, style='Accent.TButton').pack(anchor='e', pady=(12, 0))
+    except Exception as exc:
+        _cuma_11000_log('Falha na prévia antes/depois', exc)
+        messagebox.showerror('Prévia antes/depois', friendly_error(exc))
+
+
+def _cuma_11000_open_metadata_editor(self) -> None:
+    try:
+        data = _cuma_11000_app_processing_settings(self)
+        meta = data.get('metadata', {}) if isinstance(data.get('metadata'), dict) else {}
+        top = tk.Toplevel(self.root)
+        top.title('Metadados do livro - CUMA 1.100.0')
+        top.geometry('680x520')
+        try:
+            pal = getattr(self, '_theme_palette', {}) or {}
+            top.configure(bg=pal.get('bg', '#0F1318'))
+        except Exception:
+            pass
+        wrap = ttk.Frame(top, style='Card.TFrame', padding=14)
+        wrap.pack(fill='both', expand=True)
+        ttk.Label(wrap, text='Metadados para EPUB/saídas', style='TitleSmall.TLabel').grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+        vars_ = {k: tk.StringVar(value=str(meta.get(k, 'pt-BR' if k == 'language' else ''))) for k in ('title', 'creator', 'series', 'volume', 'language')}
+        labels = [('title','Título'),('creator','Autor/criador'),('series','Série'),('volume','Volume'),('language','Idioma')]
+        for r, (key, label) in enumerate(labels, start=1):
+            ttk.Label(wrap, text=label, style='Muted.TLabel').grid(row=r, column=0, sticky='w', pady=5, padx=(0, 10))
+            ttk.Entry(wrap, textvariable=vars_[key], width=56).grid(row=r, column=1, sticky='ew', pady=5)
+        ttk.Label(wrap, text='Descrição', style='Muted.TLabel').grid(row=6, column=0, sticky='nw', pady=5, padx=(0, 10))
+        txt = tk.Text(wrap, height=8, wrap='word')
+        txt.grid(row=6, column=1, sticky='nsew', pady=5)
+        txt.insert('1.0', str(meta.get('description', '')))
+        wrap.columnconfigure(1, weight=1); wrap.rowconfigure(6, weight=1)
+        def save_meta():
+            data2 = _cuma_11000_app_processing_settings(self)
+            data2['metadata'] = {k: v.get() for k, v in vars_.items()}
+            data2['metadata']['description'] = txt.get('1.0', 'end').strip()
+            _cuma_11000_save_processing_settings(data2)
+            messagebox.showinfo('Metadados', 'Metadados salvos para as próximas conversões EPUB.')
+            top.destroy()
+        btns = ttk.Frame(wrap, style='Card.TFrame')
+        btns.grid(row=7, column=0, columnspan=2, sticky='ew', pady=(12, 0))
+        ttk.Button(btns, text='Salvar', command=save_meta, style='Accent.TButton').pack(side='right', padx=(8, 0))
+        ttk.Button(btns, text='Cancelar', command=top.destroy, style='Ghost.TButton').pack(side='right')
+    except Exception as exc:
+        _cuma_11000_log('Falha no editor de metadados', exc)
+        messagebox.showerror('Metadados', friendly_error(exc))
+
+
+def _cuma_11000_add_advanced_converter_panel(self) -> None:
+    try:
+        container = getattr(self, 'tab_xteink', None)
+        if container is None or getattr(self, '_cuma_11000_panel_added', False):
+            return
+        self._cuma_11000_panel_added = True
+        settings = _cuma_11000_app_processing_settings(self)
+        if not hasattr(self, 'cuma_reading_order'):
+            self.cuma_reading_order = tk.StringVar(value=settings.get('reading_order', 'Ocidental'))
+        if not hasattr(self, 'cuma_image_preset'):
+            self.cuma_image_preset = tk.StringVar(value=settings.get('image_preset', 'Original'))
+        if not hasattr(self, 'cuma_auto_crop'):
+            self.cuma_auto_crop = tk.BooleanVar(value=bool(settings.get('auto_crop', False)))
+        if not hasattr(self, 'cuma_auto_crop_strength'):
+            self.cuma_auto_crop_strength = tk.StringVar(value=settings.get('auto_crop_strength', 'Normal'))
+        if not hasattr(self, 'cuma_remove_page_numbers'):
+            self.cuma_remove_page_numbers = tk.BooleanVar(value=bool(settings.get('remove_page_numbers', False)))
+        if not hasattr(self, 'cuma_split_double_pages'):
+            self.cuma_split_double_pages = tk.BooleanVar(value=bool(settings.get('split_double_pages', False)))
+        if not hasattr(self, 'cuma_split_keep_original'):
+            self.cuma_split_keep_original = tk.BooleanVar(value=bool(settings.get('split_keep_original', False)))
+        if not hasattr(self, 'cuma_webtoon_split'):
+            self.cuma_webtoon_split = tk.BooleanVar(value=bool(settings.get('webtoon_split', False)))
+        kwargs = {'fill': 'x', 'pady': (0, 10)}
+        children = list(container.winfo_children())
+        if children:
+            kwargs['before'] = children[0]
+        panel = ttk.LabelFrame(container, text='Otimização de leitura e E-ink - 1.100.0', padding=12, style='Card.TLabelframe')
+        panel.pack(**kwargs)
+        ttk.Label(panel, text='Leitura', style='Muted.TLabel').grid(row=0, column=0, sticky='w', padx=(0, 8), pady=4)
+        cb_order = ttk.Combobox(panel, textvariable=self.cuma_reading_order, values=CUMA_11000_READING_ORDERS, state='readonly', width=14)
+        cb_order.grid(row=0, column=1, sticky='w', pady=4)
+        ttk.Label(panel, text='Preset de imagem', style='Muted.TLabel').grid(row=0, column=2, sticky='w', padx=(18, 8), pady=4)
+        cb_preset = ttk.Combobox(panel, textvariable=self.cuma_image_preset, values=CUMA_11000_IMAGE_PRESETS, state='readonly', width=24)
+        cb_preset.grid(row=0, column=3, sticky='w', pady=4)
+        ttk.Label(panel, text='Corte', style='Muted.TLabel').grid(row=0, column=4, sticky='w', padx=(18, 8), pady=4)
+        cb_crop = ttk.Combobox(panel, textvariable=self.cuma_auto_crop_strength, values=CUMA_11000_CROP_STRENGTHS, state='readonly', width=10)
+        cb_crop.grid(row=0, column=5, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover margens', variable=self.cuma_auto_crop, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover número/rodapé', variable=self.cuma_remove_page_numbers, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=2, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=4, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Webtoon/imagens longas', variable=self.cuma_webtoon_split, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=2, column=2, columnspan=2, sticky='w', pady=4)
+        ttk.Button(panel, text='Prévia antes/depois', command=lambda: _cuma_11000_open_before_after_preview(self), style='Accent.TButton').grid(row=2, column=4, sticky='w', padx=(18, 6), pady=4)
+        ttk.Button(panel, text='Metadados', command=lambda: _cuma_11000_open_metadata_editor(self), style='Ghost.TButton').grid(row=2, column=5, sticky='w', pady=4)
+        for cb in (cb_order, cb_preset, cb_crop):
+            cb.bind('<<ComboboxSelected>>', lambda _e: _cuma_11000_set_processing_from_app(self))
+        ttk.Label(panel, text='CBZ/ZIP funcionam nativamente. CBR/RAR/7Z usam 7-Zip se estiver instalado no Windows.', style='Muted.TLabel', wraplength=950, justify='left').grid(row=3, column=0, columnspan=6, sticky='w', pady=(8, 0))
+    except Exception as exc:
+        _cuma_11000_log('Falha ao adicionar painel 1.100.0', exc)
+
+
+def _cuma_11000_setup_vars(self):
+    _CUMA_11000_RUNTIME['setup_vars'](self)
+    try:
+        settings = _cuma_11000_processing_settings()
+        self.cuma_reading_order = tk.StringVar(value=settings.get('reading_order', 'Ocidental'))
+        self.cuma_auto_crop = tk.BooleanVar(value=bool(settings.get('auto_crop', False)))
+        self.cuma_auto_crop_strength = tk.StringVar(value=settings.get('auto_crop_strength', 'Normal'))
+        self.cuma_remove_page_numbers = tk.BooleanVar(value=bool(settings.get('remove_page_numbers', False)))
+        self.cuma_split_double_pages = tk.BooleanVar(value=bool(settings.get('split_double_pages', False)))
+        self.cuma_split_keep_original = tk.BooleanVar(value=bool(settings.get('split_keep_original', False)))
+        self.cuma_webtoon_split = tk.BooleanVar(value=bool(settings.get('webtoon_split', False)))
+        self.cuma_image_preset = tk.StringVar(value=settings.get('image_preset', 'Original'))
+    except Exception as exc:
+        _cuma_11000_log('setup_vars 1.100.0', exc)
+
+
+def _cuma_11000_save_current_config(self, force: bool = False):
+    result = _CUMA_11000_RUNTIME['save_current_config'](self, force)
+    try:
+        if force or not hasattr(self, 'auto_save_config') or self.auto_save_config.get():
+            _cuma_11000_set_processing_from_app(self)
+    except Exception as exc:
+        _cuma_11000_log('Salvar opções 1.100.0', exc)
+    return result
+
+
+def _cuma_11000_build(self):
+    result = _CUMA_11000_RUNTIME['build'](self)
+    try:
+        _cuma_11000_add_advanced_converter_panel(self)
+        _cuma_11000_refresh_device_globals()
+    except Exception as exc:
+        _cuma_11000_log('build 1.100.0', exc)
+    return result
+
+
+def _cuma_11000_add_xteink_path(self, path: Path) -> bool:
+    path = Path(path)
+    if path.is_dir():
+        added = False
+        for f in sorted(path.rglob('*'), key=lambda p: _cuma_11000_natural_key(p.as_posix())):
+            if f.suffix.lower() in ('.pdf', '.epub') + CUMA_11000_ARCHIVE_EXTS:
+                added = _cuma_11000_add_xteink_path(self, f) or added
+        return added
+    if path.suffix.lower() not in ('.pdf', '.epub') + CUMA_11000_ARCHIVE_EXTS or not path.exists() or path in getattr(self, 'xteink_files', []):
+        return False
+    self.xteink_files.append(path)
+    iid = _cuma_11008_path_key(path)
+    if not self.xteink_tree.exists(iid):
+        self.xteink_tree.insert('', 'end', iid=iid, values=(path.name, 'Aguardando', path.suffix[1:].upper(), '', ''))
+    self.xteink_input.set(str(path))
+    self.update_xteink_counter()
+    return True
+
+
+def _cuma_11000_add_xteink_files(self) -> None:
+    files = filedialog.askopenfilenames(title='Adicionar PDF/EPUB/CBZ/ZIP/CBR/RAR/7Z', filetypes=[('Compatíveis', '*.pdf *.epub *.cbz *.zip *.cbr *.rar *.7z'), ('PDF', '*.pdf'), ('EPUB', '*.epub'), ('Compactados', '*.cbz *.zip *.cbr *.rar *.7z'), ('Todos', '*.*')])
+    for f in sorted(files, key=_cuma_11000_natural_key):
+        self.add_xteink_path(Path(f))
+
+
+def _cuma_11000_xteink_status_for_src(src: Path, flags: dict) -> str:
+    suffix = Path(src).suffix.lower()
+    if suffix == '.pdf':
+        parts = []
+        if flags.get('pdf_epub'): parts.append('PDF→EPUB')
+        if flags.get('pdf_xtch'): parts.append('PDF→XTCH')
+        return ' + '.join(parts) or 'PDF'
+    if suffix == '.epub':
+        return 'EPUB→XTCH' if flags.get('epub_xtch') else 'EPUB'
+    if suffix in CUMA_11000_ARCHIVE_EXTS:
+        parts = []
+        if flags.get('pdf_epub'): parts.append('IMG→EPUB')
+        if flags.get('pdf_xtch'): parts.append('IMG→XTCH')
+        return ' + '.join(parts) or suffix.upper().lstrip('.')
+    return suffix.upper().lstrip('.')
+
+
+def _cuma_11000_open_xteink_settings_window(self) -> None:
+    try:
+        return _CUMA_11000_RUNTIME['open_xteink_settings_window'](self)
+    finally:
+        try:
+            _cuma_11000_set_processing_from_app(self)
+        except Exception:
+            pass
+
+
+def _cuma_11000_create_pdf_from_images_dialog(self) -> None:
+    files = filedialog.askopenfilenames(title='Selecione imagens', filetypes=[('Imagens', '*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff'), ('Todos', '*.*')])
+    if not files:
+        return
+    out = filedialog.asksaveasfilename(title='Salvar PDF como', defaultextension='.pdf', filetypes=[('PDF', '*.pdf')])
+    if not out:
+        return
+    try:
+        image_paths = sorted([Path(f) for f in files if Path(f).suffix.lower() in SUPPORTED_IMAGE_EXT], key=lambda p: _cuma_11000_natural_key(p.name))
+        save_images_to_pdf(image_paths, Path(out))
+        self.log(f'PDF criado a partir de imagens: {out}')
+        messagebox.showinfo('Concluído', f'PDF criado:\n{out}')
+    except Exception as exc:
+        messagebox.showerror('Erro', friendly_error(exc))
+
+
+def _cuma_11000_save_images_to_pdf(image_paths: list[Path], output_pdf: Path) -> None:
+    image_paths = sorted([Path(p) for p in image_paths], key=lambda p: _cuma_11000_natural_key(p.name))
+    return _CUMA_11000_RUNTIME['save_images_to_pdf'](image_paths, output_pdf)
+
+
+def _cuma_11000_force_version_files() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11000_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11000_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {'version': CUMA_11000_VERSION, 'date': datetime.now().strftime('%Y-%m-%d'), 'notes': 'Roadmap KCC consolidado: perfis, leitura, E-ink, preview, metadados e compactados.'}
+    except Exception:
+        pass
+    try:
+        state = cuma_version_load_state()
+        events = state.get('events', [])
+        if not isinstance(events, list):
+            events = []
+        if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11000_UPDATE_ID for e in events):
+            events.append({'update_id': CUMA_11000_UPDATE_ID, 'version': CUMA_11000_VERSION, 'base_version': CUMA_VERSION_BASE, 'scale': 'grande', 'description': 'Consolidação das versões 1.082.0, 1.090.0 e 1.100.0: perfis reais, leitura mangá, otimização E-ink, páginas duplas, metadados, preview e compactados.', 'timestamp': datetime.now().isoformat(timespec='seconds')})
+        state['events'] = events[-80:]
+        state['current_version'] = CUMA_11000_VERSION
+        state['base_version'] = CUMA_VERSION_BASE
+        cuma_version_save_state(state)
+        _cuma_version_write_public_files(state)
+        cuma_version_apply_globals(CUMA_11000_VERSION)
+    except Exception as exc:
+        _cuma_11000_log('Versionamento 1.100.0', exc)
+
+
+_CUMA_11000_RUNTIME = {
+    'setup_vars': App.setup_vars,
+    'save_current_config': App.save_current_config,
+    'build': App.build,
+    'add_xteink_path': getattr(App, 'add_xteink_path', None),
+    'add_xteink_files': getattr(App, 'add_xteink_files', None),
+    'open_xteink_settings_window': getattr(App, 'open_xteink_settings_window', None),
+    'create_pdf_from_images_dialog': getattr(App, 'create_pdf_from_images_dialog', None),
+    'default_profiles': globals().get('_cuma_default_device_profiles_settings'),
+    'device_profiles': globals().get('_cuma_device_profiles'),
+    'save_images_to_pdf': globals().get('save_images_to_pdf'),
+}
+
+
+def _cuma_install_11000_full_roadmap() -> None:
+    try:
+        _cuma_11000_force_version_files()
+        globals()['_cuma_default_device_profiles_settings'] = _cuma_11000_default_device_profiles
+        globals()['_cuma_device_profiles'] = _cuma_11000_device_profiles
+        _cuma_11000_refresh_device_globals()
+        globals()['iter_pdf_pages_as_images'] = _cuma_11000_iter_pdf_pages_as_images
+        globals()['iter_epub_images'] = _cuma_11000_iter_epub_images
+        globals()['extract_epub_images'] = _cuma_11000_extract_epub_images
+        globals()['create_image_epub'] = _cuma_11000_create_image_epub
+        globals()['create_image_epub_from_pdf'] = _cuma_11000_create_image_epub_from_pdf
+        globals()['_cuma_run_xteink_job'] = _cuma_11000_run_xteink_job
+        globals()['_cuma_xteink_status_for_src'] = _cuma_11000_xteink_status_for_src
+        globals()['save_images_to_pdf'] = _cuma_11000_save_images_to_pdf
+        App.setup_vars = _cuma_11000_setup_vars
+        App.save_current_config = _cuma_11000_save_current_config
+        App.build = _cuma_11000_build
+        App.add_xteink_path = _cuma_11000_add_xteink_path
+        App.add_xteink_files = _cuma_11000_add_xteink_files
+        App.open_xteink_settings_window = _cuma_11000_open_xteink_settings_window
+        if _CUMA_11000_RUNTIME.get('create_pdf_from_images_dialog') is not None:
+            App.create_pdf_from_images_dialog = _cuma_11000_create_pdf_from_images_dialog
+        App.open_cuma_before_after_preview = _cuma_11000_open_before_after_preview
+        App.open_cuma_metadata_editor = _cuma_11000_open_metadata_editor
+        try:
+            ensure_manual()
+        except Exception:
+            pass
+    except Exception as exc:
+        _cuma_11000_log('Instalação do roadmap completo 1.100.0', exc)
+
+
+_cuma_install_11000_full_roadmap()
+
+
+# Ajuste técnico 1.100.0: XTCH com contagem real após cortes/divisões.
+def _cuma_11000_create_xtch_from_iter_stream(image_iter, output_xtch: Path, title: str, target: tuple[int, int]) -> None:
+    import tempfile
+    output_xtch.parent.mkdir(parents=True, exist_ok=True)
+    w, h = target
+    sizes = []
+    with tempfile.NamedTemporaryFile(prefix='cuma_xtch_pages_', suffix='.bin', delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            for im in image_iter:
+                try:
+                    blob = xth_page_bytes(im, target)
+                    tmp.write(blob)
+                    sizes.append(len(blob))
+                finally:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+        finally:
+            pass
+    try:
+        page_count = len(sizes)
+        if page_count <= 0:
+            raise RuntimeError('Nenhuma imagem para criar XTCH.')
+        if page_count > 65535:
+            raise RuntimeError('XTCH suporta no máximo 65535 páginas por arquivo.')
+        header_size = 56
+        table_offset = header_size
+        data_offset = header_size + page_count * 16
+        header = struct.pack('<IBBHBBBBIQQQQII', 0x48435458, 1, 0, page_count, 0, 0, 0, 0, 1, 0, table_offset, data_offset, 0, 0, 0)
+        with output_xtch.open('wb') as out:
+            out.write(header)
+            cursor = data_offset
+            for size in sizes:
+                out.write(struct.pack('<QIHH', cursor, size, w, h))
+                cursor += size
+            with tmp_path.open('rb') as inp:
+                shutil.copyfileobj(inp, out, length=1024 * 1024)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _cuma_11000_create_xtch_from_pdf(pdf_path: Path, output_xtch: Path, title: str, target: tuple[int, int]) -> None:
+    return _cuma_11000_create_xtch_from_iter_stream(_cuma_11000_iter_pdf_pages_as_images(pdf_path, target=target), output_xtch, title, target)
+
+
+def _cuma_11000_create_xtch_from_epub_stream(epub_path: Path, output_xtch: Path, title: str, target: tuple[int, int]) -> None:
+    return _cuma_11000_create_xtch_from_iter_stream(_cuma_11000_iter_epub_images(epub_path, target), output_xtch, title, target)
+
+
+def _cuma_11000_create_xtch_from_archive_stream(archive_path: Path, output_xtch: Path, title: str, target: tuple[int, int]) -> None:
+    return _cuma_11000_create_xtch_from_iter_stream(_cuma_11000_iter_archive_images(archive_path, target=target), output_xtch, title, target)
+
+
+def _cuma_11000_run_xteink_job_stream_safe(src: Path, out_dir: Path, target: tuple[int, int], quality: int, flags: dict) -> list[Path]:
+    outputs = []
+    src = Path(src)
+    suffix = src.suffix.lower()
+    if suffix == '.pdf' and (flags.get('pdf_epub') or flags.get('pdf_xtch')):
+        if flags.get('pdf_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_image_epub_from_pdf(src, out, src.stem, target=target, quality=quality)
+            outputs.append(out)
+        if flags.get('pdf_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_pdf(src, out, src.stem, target)
+            outputs.append(out)
+    elif suffix == '.epub' and flags.get('epub_xtch'):
+        out = unique_path(out_dir / f'{src.stem}.xtch')
+        _cuma_11000_create_xtch_from_epub_stream(src, out, src.stem, target)
+        outputs.append(out)
+    elif suffix in CUMA_11000_ARCHIVE_EXTS and (flags.get('pdf_epub') or flags.get('pdf_xtch')):
+        if flags.get('pdf_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_epub_from_archive(src, out, src.stem, target=target, quality=quality)
+            outputs.append(out)
+        if flags.get('pdf_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_archive_stream(src, out, src.stem, target)
+            outputs.append(out)
+    else:
+        raise RuntimeError('Formato/combinação de conversão não suportado. Use PDF, EPUB, CBZ/ZIP ou CBR/RAR/7Z com 7-Zip instalado.')
+    return outputs
+
+
+globals()['create_xtch_from_pdf'] = _cuma_11000_create_xtch_from_pdf
+globals()['create_xtch_from_epub'] = _cuma_11000_create_xtch_from_epub_stream
+globals()['_cuma_run_xteink_job'] = _cuma_11000_run_xteink_job_stream_safe
 
 def main() -> None:
     install_global_error_handlers()
@@ -12386,6 +14027,5658 @@ def main() -> None:
     except Exception as exc:
         write_error_log(type(exc), exc, exc.__traceback__, 'Falha ao iniciar ou executar o aplicativo')
         raise
+
+# Chamada main movida para o fim por patches finais do CUMA.
+
+# =============================================================================
+# CUMA 1.100.0 - CORREÇÃO OFICIAL DE CONEXÕES GITHUB SOLDIEG
+# =============================================================================
+# Mantém a versão 1.100.0 e corrige as conexões de atualização para o repositório
+# oficial informado pelo autor: https://github.com/soldieg/CUMA.
+# Também migra configurações antigas salvas com o usuário/repositório anterior,
+# evitando que instalações antigas continuem tentando baixar manifesto em URL 404.
+
+CUMA_OFFICIAL_GITHUB_OWNER = "soldieg"
+CUMA_OFFICIAL_GITHUB_REPO = "CUMA"
+CUMA_OFFICIAL_RELEASE_TAG = "Stable"
+CUMA_OFFICIAL_REPO_URL = "https://github.com/soldieg/CUMA"
+CUMA_DEFAULT_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json"
+CUMA_DEFAULT_UPDATE_DOWNLOAD_URL = "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip"
+CUMA_DEFAULT_UPDATE_SHA256 = ""
+CUMA_DEFAULT_UPDATE_SIZE_BYTES = 0
+
+
+def _cuma_github_normalize_manifest_url(url_value: str = "") -> str:
+    """Normaliza URLs antigas/erradas do manifesto para o endpoint oficial."""
+    url = str(url_value or "").strip()
+    if not url:
+        return CUMA_DEFAULT_UPDATE_MANIFEST_URL
+
+    lowered = url.lower()
+
+    legacy_or_wrong = (
+        "soldiego/cuma" in lowered or
+        "github.com/soldiego" in lowered or
+        "raw.githubusercontent.com/soldiego" in lowered
+    )
+    official_cuma_manifest_variant = (
+        "raw.githubusercontent.com" in lowered and
+        "/cuma/" in lowered and
+        lowered.endswith("/updates/stable.json")
+    )
+
+    # Se é uma URL antiga conhecida ou uma variação do próprio manifesto do CUMA,
+    # força o endpoint oficial atual. URLs personalizadas externas são preservadas.
+    if legacy_or_wrong or official_cuma_manifest_variant:
+        return CUMA_DEFAULT_UPDATE_MANIFEST_URL
+
+    return url
+
+
+def _cuma_update_manifest_url_from_settings() -> str:
+    try:
+        settings = cuma_settings_load()
+        changed = False
+        if not isinstance(settings, dict):
+            settings = {}
+            changed = True
+
+        cfg = settings.setdefault('config', {})
+        updates = settings.setdefault('updates', {})
+
+        candidate = ''
+        if isinstance(cfg, dict):
+            candidate = str(cfg.get('update_manifest_url', '') or '').strip()
+        if not candidate and isinstance(updates, dict):
+            candidate = str(updates.get('manifest_url', '') or '').strip()
+
+        normalized = _cuma_github_normalize_manifest_url(candidate)
+
+        if isinstance(cfg, dict) and cfg.get('update_manifest_url') != normalized:
+            cfg['update_manifest_url'] = normalized
+            cfg['update_channel'] = 'stable'
+            changed = True
+
+        if isinstance(updates, dict):
+            if updates.get('manifest_url') != normalized:
+                updates['manifest_url'] = normalized
+                changed = True
+            updates.setdefault('channel', 'stable')
+            updates.setdefault('release_tag', CUMA_OFFICIAL_RELEASE_TAG)
+            updates.setdefault('download_url', CUMA_DEFAULT_UPDATE_DOWNLOAD_URL)
+            updates.setdefault('auto_download', False)
+            updates.setdefault('verify_sha256', True)
+
+        if changed:
+            cuma_settings_save(settings)
+
+        return normalized
+    except Exception as exc:
+        try:
+            write_log(f'Normalização de URL de atualização GitHub: {exc}')
+        except Exception:
+            pass
+        return CUMA_DEFAULT_UPDATE_MANIFEST_URL
+
+
+def _cuma_ensure_update_settings_defaults() -> None:
+    try:
+        settings = cuma_settings_load()
+        if not isinstance(settings, dict):
+            settings = {}
+
+        cfg = settings.setdefault('config', {})
+        updates = settings.setdefault('updates', {})
+
+        old_cfg_url = ''
+        if isinstance(cfg, dict):
+            old_cfg_url = str(cfg.get('update_manifest_url', '') or '').strip()
+        old_updates_url = ''
+        if isinstance(updates, dict):
+            old_updates_url = str(updates.get('manifest_url', '') or '').strip()
+
+        chosen = old_cfg_url or old_updates_url
+        normalized = _cuma_github_normalize_manifest_url(chosen)
+
+        if isinstance(cfg, dict):
+            cfg['update_manifest_url'] = normalized
+            cfg['update_channel'] = 'stable'
+
+        if isinstance(updates, dict):
+            updates['manifest_url'] = normalized
+            updates['channel'] = 'stable'
+            updates['release_tag'] = CUMA_OFFICIAL_RELEASE_TAG
+            updates['download_url'] = CUMA_DEFAULT_UPDATE_DOWNLOAD_URL
+            updates.setdefault('auto_download', False)
+            updates.setdefault('verify_sha256', True)
+            updates.setdefault('last_checked_at', '')
+            updates.setdefault('last_available_version', '')
+
+        cuma_settings_save(settings)
+    except Exception as exc:
+        try:
+            write_log(f'Configuração padrão de atualização GitHub oficial: {exc}')
+        except Exception:
+            pass
+
+
+
+# =============================================================================
+# CUMA 1.100.1 - REORGANIZAÇÃO LIMPAR/CONVERTER + CONVERSÕES DINÂMICAS
+# =============================================================================
+# Esta camada mantém o roadmap 1.100.0, mas corrige a separação conceitual:
+# - Limpar: preparação/otimização visual do conteúdo.
+# - Converter: escolha de dispositivo, metadados, prévia e conversões por tipo.
+# Também amplia as conversões disponíveis por detecção automática de extensão.
+
+CUMA_11001_VERSION = '1.100.1'
+CUMA_11001_UPDATE_ID = 'reorganizacao_limpar_converter_conversoes_dinamicas_11001'
+CUMA_11001_ARCHIVE_EXTS = tuple(globals().get('CUMA_11000_ARCHIVE_EXTS', ('.cbz', '.zip', '.cbr', '.rar', '.7z')))
+CUMA_11001_IMAGE_EXTS = tuple(globals().get('SUPPORTED_IMAGE_EXT', ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff')))
+
+CUMA_11001_CONVERSION_LABELS = {
+    'pdf_epub': 'PDF → EPUB',
+    'pdf_xtch': 'PDF → XTCH',
+    'pdf_cbz': 'PDF → CBZ',
+    'pdf_images': 'PDF → imagens',
+    'epub_xtch': 'EPUB → XTCH',
+    'epub_pdf': 'EPUB → PDF',
+    'archive_epub': 'CBZ/ZIP/CBR/RAR/7Z → EPUB',
+    'archive_xtch': 'CBZ/ZIP/CBR/RAR/7Z → XTCH',
+    'archive_pdf': 'CBZ/ZIP/CBR/RAR/7Z → PDF',
+    'images_pdf': 'Imagem → PDF',
+    'images_epub': 'Imagem → EPUB',
+    'images_xtch': 'Imagem → XTCH',
+}
+
+CUMA_11001_CONVERSIONS_BY_KIND = {
+    'pdf': ('pdf_epub', 'pdf_xtch', 'pdf_cbz', 'pdf_images'),
+    'epub': ('epub_xtch', 'epub_pdf'),
+    'archive': ('archive_epub', 'archive_xtch', 'archive_pdf'),
+    'image': ('images_pdf', 'images_epub', 'images_xtch'),
+}
+
+
+def _cuma_11001_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        if exc is None:
+            write_log(f'[CUMA 1.100.1] {context}')
+        else:
+            write_log(f'[CUMA 1.100.1] {context}: {exc}')
+    except Exception:
+        pass
+
+
+def _cuma_11001_boolvar(self, name: str, default: bool = False) -> tk.BooleanVar:
+    var = getattr(self, name, None)
+    if isinstance(var, tk.BooleanVar):
+        return var
+    try:
+        var = tk.BooleanVar(value=default)
+    except Exception:
+        var = tk.BooleanVar(value=default)
+    try:
+        setattr(self, name, var)
+    except Exception:
+        pass
+    return var
+
+
+def _cuma_11001_setup_conversion_vars(self) -> None:
+    # Mantém compatibilidade com as opções antigas e adiciona as novas.
+    _cuma_11001_boolvar(self, 'xteink_pdf_epub', False)
+    _cuma_11001_boolvar(self, 'xteink_pdf_xtch', True)
+    _cuma_11001_boolvar(self, 'xteink_epub_xtch', True)
+    _cuma_11001_boolvar(self, 'xteink_pdf_cbz', False)
+    _cuma_11001_boolvar(self, 'xteink_pdf_images', False)
+    _cuma_11001_boolvar(self, 'xteink_epub_pdf', False)
+    _cuma_11001_boolvar(self, 'xteink_archive_epub', False)
+    _cuma_11001_boolvar(self, 'xteink_archive_xtch', True)
+    _cuma_11001_boolvar(self, 'xteink_archive_pdf', False)
+    _cuma_11001_boolvar(self, 'xteink_images_pdf', True)
+    _cuma_11001_boolvar(self, 'xteink_images_epub', False)
+    _cuma_11001_boolvar(self, 'xteink_images_xtch', False)
+
+
+def _cuma_11001_var_for_key(self, key: str) -> tk.BooleanVar:
+    mapping = {
+        'pdf_epub': ('xteink_pdf_epub', False),
+        'pdf_xtch': ('xteink_pdf_xtch', True),
+        'pdf_cbz': ('xteink_pdf_cbz', False),
+        'pdf_images': ('xteink_pdf_images', False),
+        'epub_xtch': ('xteink_epub_xtch', True),
+        'epub_pdf': ('xteink_epub_pdf', False),
+        'archive_epub': ('xteink_archive_epub', False),
+        'archive_xtch': ('xteink_archive_xtch', True),
+        'archive_pdf': ('xteink_archive_pdf', False),
+        'images_pdf': ('xteink_images_pdf', True),
+        'images_epub': ('xteink_images_epub', False),
+        'images_xtch': ('xteink_images_xtch', False),
+    }
+    name, default = mapping[key]
+    return _cuma_11001_boolvar(self, name, default)
+
+
+def _cuma_11001_kind_for_path(path: Path) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix == '.pdf':
+        return 'pdf'
+    if suffix == '.epub':
+        return 'epub'
+    if suffix in CUMA_11001_ARCHIVE_EXTS:
+        return 'archive'
+    if suffix in CUMA_11001_IMAGE_EXTS:
+        return 'image'
+    return 'unknown'
+
+
+def _cuma_11001_active_converter_path(self) -> Path | None:
+    try:
+        selected = set(getattr(self, 'xteink_tree').selection())
+        if selected:
+            for p in getattr(self, 'xteink_files', []):
+                if _cuma_11008_path_key(Path(p)) in selected:
+                    return Path(p)
+    except Exception:
+        pass
+    try:
+        value = str(getattr(self, 'xteink_input').get() or '').strip()
+        if value:
+            p = Path(value)
+            if p.exists():
+                return p
+    except Exception:
+        pass
+    try:
+        files = list(getattr(self, 'xteink_files', []) or [])
+        if files:
+            return Path(files[0])
+    except Exception:
+        pass
+    return None
+
+
+def _cuma_11001_flags(self) -> dict:
+    _cuma_11001_setup_conversion_vars(self)
+    return {key: bool(_cuma_11001_var_for_key(self, key).get()) for key in CUMA_11001_CONVERSION_LABELS}
+
+
+def _cuma_11001_status_for_src(src: Path, flags: dict) -> str:
+    kind = _cuma_11001_kind_for_path(src)
+    keys = CUMA_11001_CONVERSIONS_BY_KIND.get(kind, ())
+    chosen = [CUMA_11001_CONVERSION_LABELS[k] for k in keys if flags.get(k)]
+    return ' + '.join(chosen) if chosen else ('Aguardando opção' if kind != 'unknown' else 'Formato não suportado')
+
+
+def _cuma_11001_refresh_conversion_options(self) -> None:
+    try:
+        path = _cuma_11001_active_converter_path(self)
+        kind = _cuma_11001_kind_for_path(path) if path else 'unknown'
+        active_keys = set(CUMA_11001_CONVERSIONS_BY_KIND.get(kind, ()))
+        label = getattr(self, 'cuma_conversion_hint', None)
+        if label is not None:
+            if path:
+                if kind == 'archive' and Path(path).suffix.lower() in ('.cbr', '.rar', '.7z'):
+                    label.set(f'Arquivo detectado: {Path(path).suffix.upper().lstrip(".")} • opções de compactado. CBR/RAR/7Z exigem 7-Zip no PATH.')
+                else:
+                    label.set(f'Arquivo detectado: {Path(path).suffix.upper().lstrip(".")} • escolha as conversões disponíveis abaixo.')
+            else:
+                label.set('Adicione ou selecione um arquivo para liberar as conversões compatíveis.')
+        widgets = getattr(self, '_cuma_11001_conversion_widgets', {})
+        for key, widget in widgets.items():
+            try:
+                if key in active_keys:
+                    widget.grid()
+                    widget.configure(state='normal')
+                else:
+                    widget.grid_remove()
+                    widget.configure(state='disabled')
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11001_log('Atualização das opções dinâmicas de conversão', exc)
+
+
+def _cuma_11001_destroy_legacy_converter_optimization_panel(self) -> None:
+    try:
+        container = getattr(self, 'tab_xteink', None)
+        if container is None:
+            return
+        stack = [container]
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(list(widget.winfo_children()))
+            except Exception:
+                pass
+            try:
+                txt = str(widget.cget('text') or '')
+            except Exception:
+                txt = ''
+            normalized = txt.lower()
+            if isinstance(widget, ttk.LabelFrame) and ('otimização de leitura' in normalized or 'e-ink - 1.100.0' in normalized):
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+            # Remove checkboxes antigos de conversão fixa criados no painel legado.
+            if isinstance(widget, ttk.Checkbutton) and txt in ('PDF para EPUB', 'PDF para XTCH', 'EPUB para XTCH'):
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+    except Exception as exc:
+        _cuma_11001_log('Remoção do painel legado do Converter', exc)
+
+
+def _cuma_11001_find_tree_frame(tab) -> object | None:
+    try:
+        for child in tab.winfo_children():
+            try:
+                descendants = list(child.winfo_children())
+            except Exception:
+                descendants = []
+            if any(isinstance(d, ttk.Treeview) for d in descendants):
+                return child
+    except Exception:
+        pass
+    return None
+
+
+def _cuma_11001_add_clean_optimization_panel(self) -> None:
+    try:
+        tab = getattr(self, 'tab_files', None)
+        if tab is None:
+            return
+        # Remove versão anterior do painel para evitar duplicação ao reconstruir interface.
+        for child in list(tab.winfo_children()):
+            try:
+                if isinstance(child, ttk.LabelFrame) and 'Limpeza e otimização de leitura' in str(child.cget('text')):
+                    child.destroy()
+            except Exception:
+                pass
+
+        _cuma_11001_setup_conversion_vars(self)
+        settings = _cuma_11000_app_processing_settings(self) if '_cuma_11000_app_processing_settings' in globals() else {}
+
+        if not hasattr(self, 'cuma_reading_order'):
+            self.cuma_reading_order = tk.StringVar(value=settings.get('reading_order', 'Ocidental'))
+        if not hasattr(self, 'cuma_image_preset'):
+            self.cuma_image_preset = tk.StringVar(value=settings.get('image_preset', 'Original'))
+        if not hasattr(self, 'cuma_auto_crop'):
+            self.cuma_auto_crop = tk.BooleanVar(value=bool(settings.get('auto_crop', False)))
+        if not hasattr(self, 'cuma_auto_crop_strength'):
+            self.cuma_auto_crop_strength = tk.StringVar(value=settings.get('auto_crop_strength', 'Normal'))
+        if not hasattr(self, 'cuma_remove_page_numbers'):
+            self.cuma_remove_page_numbers = tk.BooleanVar(value=bool(settings.get('remove_page_numbers', False)))
+        if not hasattr(self, 'cuma_split_double_pages'):
+            self.cuma_split_double_pages = tk.BooleanVar(value=bool(settings.get('split_double_pages', False)))
+        if not hasattr(self, 'cuma_split_keep_original'):
+            self.cuma_split_keep_original = tk.BooleanVar(value=bool(settings.get('split_keep_original', False)))
+        if not hasattr(self, 'cuma_webtoon_split'):
+            self.cuma_webtoon_split = tk.BooleanVar(value=bool(settings.get('webtoon_split', False)))
+
+        before = _cuma_11001_find_tree_frame(tab)
+        kwargs = {'fill': 'x', 'pady': (0, 10)}
+        if before is not None:
+            kwargs['before'] = before
+
+        panel = ttk.LabelFrame(tab, text='Limpeza e otimização de leitura / E-ink', padding=12, style='Card.TLabelframe')
+        panel.pack(**kwargs)
+
+        ttk.Label(panel, text='Estas opções modificam/preparam as páginas antes da exportação ou conversão.', style='Muted.TLabel', wraplength=1050, justify='left').grid(row=0, column=0, columnspan=6, sticky='w', pady=(0, 8))
+
+        ttk.Label(panel, text='Ordem de leitura', style='Muted.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 8), pady=4)
+        cb_order = ttk.Combobox(panel, textvariable=self.cuma_reading_order, values=globals().get('CUMA_11000_READING_ORDERS', ('Ocidental', 'Mangá')), state='readonly', width=14)
+        cb_order.grid(row=1, column=1, sticky='w', pady=4)
+
+        ttk.Label(panel, text='Preset E-ink', style='Muted.TLabel').grid(row=1, column=2, sticky='w', padx=(18, 8), pady=4)
+        cb_preset = ttk.Combobox(panel, textvariable=self.cuma_image_preset, values=globals().get('CUMA_11000_IMAGE_PRESETS', ('Original',)), state='readonly', width=26)
+        cb_preset.grid(row=1, column=3, sticky='w', pady=4)
+
+        ttk.Label(panel, text='Força do corte', style='Muted.TLabel').grid(row=1, column=4, sticky='w', padx=(18, 8), pady=4)
+        cb_crop = ttk.Combobox(panel, textvariable=self.cuma_auto_crop_strength, values=globals().get('CUMA_11000_CROP_STRENGTHS', ('Suave', 'Normal', 'Forte')), state='readonly', width=10)
+        cb_crop.grid(row=1, column=5, sticky='w', pady=4)
+
+        def save_processing():
+            try:
+                _cuma_11000_set_processing_from_app(self)
+            except Exception as exc:
+                _cuma_11001_log('Salvar otimização de leitura', exc)
+            try:
+                self.save_current_config()
+            except Exception:
+                pass
+
+        ttk.Checkbutton(panel, text='Remover margens', variable=self.cuma_auto_crop, command=save_processing).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover número/rodapé', variable=self.cuma_remove_page_numbers, command=save_processing).grid(row=2, column=2, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=save_processing).grid(row=2, column=4, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=save_processing).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Webtoon/imagens longas', variable=self.cuma_webtoon_split, command=save_processing).grid(row=3, column=2, columnspan=2, sticky='w', pady=4)
+
+        for cb in (cb_order, cb_preset, cb_crop):
+            cb.bind('<<ComboboxSelected>>', lambda _e: save_processing())
+
+        ttk.Label(panel, text='Fluxo sugerido: use Limpar para preparar/cortar/dividir páginas; use Converter apenas para transformar o arquivo final em EPUB, XTCH, PDF, CBZ ou imagens.', style='Muted.TLabel', wraplength=1050, justify='left').grid(row=4, column=0, columnspan=6, sticky='w', pady=(8, 0))
+        panel.columnconfigure(3, weight=1)
+    except Exception as exc:
+        _cuma_11001_log('Adicionar painel Limpar/otimização', exc)
+
+
+def _cuma_11001_add_converter_dynamic_panel(self) -> None:
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        _cuma_11001_setup_conversion_vars(self)
+
+        for child in list(tab.winfo_children()):
+            try:
+                if isinstance(child, ttk.LabelFrame) and str(child.cget('text')) in ('Conversões disponíveis', 'Prévia, metadados e conversões'):
+                    child.destroy()
+            except Exception:
+                pass
+
+        children = list(tab.winfo_children())
+        kwargs = {'fill': 'x', 'pady': (0, 10)}
+        if children:
+            # Depois de dispositivos/conversões, antes da área de arquivos quando possível.
+            kwargs['before'] = children[1] if len(children) > 1 else children[0]
+
+        panel = ttk.LabelFrame(tab, text='Prévia, metadados e conversões', padding=12, style='Card.TLabelframe')
+        panel.pack(**kwargs)
+
+        top = ttk.Frame(panel, style='Card.TFrame')
+        top.grid(row=0, column=0, columnspan=4, sticky='ew')
+        ttk.Button(top, text='Prévia antes/depois', command=lambda: _cuma_11000_open_before_after_preview(self), style='Accent.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(top, text='Metadados EPUB', command=lambda: _cuma_11000_open_metadata_editor(self), style='Ghost.TButton').pack(side='left', padx=(0, 8))
+        ttk.Label(top, text='O Converter agora mostra apenas as opções compatíveis com o arquivo selecionado.', style='Muted.TLabel').pack(side='left', padx=(10, 0))
+
+        self.cuma_conversion_hint = tk.StringVar(value='Adicione ou selecione um arquivo para liberar as conversões compatíveis.')
+        ttk.Label(panel, textvariable=self.cuma_conversion_hint, style='Muted.TLabel', wraplength=1050, justify='left').grid(row=1, column=0, columnspan=4, sticky='w', pady=(10, 6))
+
+        grid = ttk.Frame(panel, style='Card.TFrame')
+        grid.grid(row=2, column=0, columnspan=4, sticky='ew')
+        self._cuma_11001_conversion_widgets = {}
+        ordered = (
+            'pdf_epub', 'pdf_xtch', 'pdf_cbz', 'pdf_images',
+            'epub_xtch', 'epub_pdf',
+            'archive_epub', 'archive_xtch', 'archive_pdf',
+            'images_pdf', 'images_epub', 'images_xtch'
+        )
+        for idx, key in enumerate(ordered):
+            var = _cuma_11001_var_for_key(self, key)
+            cb = ttk.Checkbutton(grid, text=CUMA_11001_CONVERSION_LABELS[key], variable=var)
+            cb.grid(row=idx // 4, column=idx % 4, sticky='w', padx=(0, 18), pady=4)
+            self._cuma_11001_conversion_widgets[key] = cb
+
+        try:
+            self.xteink_tree.bind('<<TreeviewSelect>>', lambda _e: _cuma_11001_refresh_conversion_options(self), add='+')
+        except Exception:
+            pass
+        try:
+            self.xteink_input.trace_add('write', lambda *_: _cuma_11001_refresh_conversion_options(self))
+        except Exception:
+            pass
+        _cuma_11001_refresh_conversion_options(self)
+    except Exception as exc:
+        _cuma_11001_log('Adicionar painel dinâmico do Converter', exc)
+
+
+def _cuma_11001_reorganize_ui(self) -> None:
+    _cuma_11001_destroy_legacy_converter_optimization_panel(self)
+    _cuma_11001_add_clean_optimization_panel(self)
+    _cuma_11001_add_converter_dynamic_panel(self)
+    try:
+        if hasattr(self, 'xteink_drop'):
+            self.xteink_drop.configure(text='Arraste PDF, EPUB, CBZ/ZIP, CBR/RAR/7Z, imagens ou pastas aqui')
+    except Exception:
+        pass
+
+
+def _cuma_11001_iter_image_file(path: Path, target: tuple[int, int] | None = None):
+    settings = _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
+    with Image.open(path) as im:
+        im = im.convert('RGB')
+        for processed in _cuma_11000_process_source_image(im, target, settings):
+            yield processed
+
+
+def _cuma_11001_iter_source_images(src: Path, target: tuple[int, int] | None = None):
+    src = Path(src)
+    suffix = src.suffix.lower()
+    if suffix == '.pdf':
+        yield from _cuma_11000_iter_pdf_pages_as_images(src, target=target)
+    elif suffix == '.epub':
+        yield from _cuma_11000_iter_epub_images(src, target or (1200, 1600))
+    elif suffix in CUMA_11001_ARCHIVE_EXTS:
+        yield from _cuma_11000_iter_archive_images(src, target=target)
+    elif suffix in CUMA_11001_IMAGE_EXTS:
+        yield from _cuma_11001_iter_image_file(src, target=target)
+    else:
+        raise RuntimeError('Formato não suportado para gerar imagens.')
+
+
+def _cuma_11001_create_pdf_from_image_iter(image_iter, output_pdf: Path) -> None:
+    output_pdf = Path(output_pdf)
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    count = 0
+    try:
+        for im in image_iter:
+            count += 1
+            try:
+                rgb = im.convert('RGB')
+                bio = BytesIO()
+                rgb.save(bio, format='JPEG', quality=92, optimize=True)
+                page = doc.new_page(width=max(1, rgb.width), height=max(1, rgb.height))
+                page.insert_image(page.rect, stream=bio.getvalue())
+            finally:
+                try:
+                    im.close()
+                except Exception:
+                    pass
+        if count <= 0:
+            raise RuntimeError('Nenhuma imagem para criar PDF.')
+        doc.save(str(output_pdf))
+    finally:
+        doc.close()
+
+
+def _cuma_11001_create_cbz_from_image_iter(image_iter, output_cbz: Path, quality: int = 92) -> None:
+    output_cbz = Path(output_cbz)
+    output_cbz.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with zipfile.ZipFile(output_cbz, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+        for im in image_iter:
+            count += 1
+            try:
+                bio = BytesIO()
+                im.convert('RGB').save(bio, format='JPEG', quality=int(max(50, min(100, quality or 92))), optimize=True)
+                z.writestr(f'page_{count:04d}.jpg', bio.getvalue())
+            finally:
+                try:
+                    im.close()
+                except Exception:
+                    pass
+    if count <= 0:
+        raise RuntimeError('Nenhuma imagem para criar CBZ.')
+
+
+def _cuma_11001_export_images_from_iter(image_iter, output_folder: Path, stem: str, quality: int = 92) -> Path:
+    output_folder = Path(output_folder) / f'{stem}_imagens'
+    output_folder.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for im in image_iter:
+        count += 1
+        try:
+            out = unique_path(output_folder / f'page_{count:04d}.jpg')
+            im.convert('RGB').save(out, format='JPEG', quality=int(max(50, min(100, quality or 92))), optimize=True)
+        finally:
+            try:
+                im.close()
+            except Exception:
+                pass
+    if count <= 0:
+        raise RuntimeError('Nenhuma imagem exportada.')
+    return output_folder
+
+
+def _cuma_11001_run_xteink_job(src: Path, out_dir: Path, target: tuple[int, int], quality: int, flags: dict) -> list[Path]:
+    outputs = []
+    src = Path(src)
+    out_dir = Path(out_dir)
+    suffix = src.suffix.lower()
+    kind = _cuma_11001_kind_for_path(src)
+
+    if kind == 'pdf':
+        if flags.get('pdf_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_image_epub_from_pdf(src, out, src.stem, target=target, quality=quality)
+            outputs.append(out)
+        if flags.get('pdf_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_pdf(src, out, src.stem, target)
+            outputs.append(out)
+        if flags.get('pdf_cbz'):
+            out = unique_path(out_dir / f'{src.stem}.cbz')
+            _cuma_11001_create_cbz_from_image_iter(_cuma_11000_iter_pdf_pages_as_images(src, target=target), out, quality)
+            outputs.append(out)
+        if flags.get('pdf_images'):
+            out_folder = _cuma_11001_export_images_from_iter(_cuma_11000_iter_pdf_pages_as_images(src, target=target), out_dir, src.stem, quality)
+            outputs.append(out_folder)
+
+    elif kind == 'epub':
+        if flags.get('epub_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_epub_stream(src, out, src.stem, target)
+            outputs.append(out)
+        if flags.get('epub_pdf'):
+            out = unique_path(out_dir / f'{src.stem}.pdf')
+            _cuma_11001_create_pdf_from_image_iter(_cuma_11000_iter_epub_images(src, target), out)
+            outputs.append(out)
+
+    elif kind == 'archive':
+        if flags.get('archive_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_epub_from_archive(src, out, src.stem, target=target, quality=quality)
+            outputs.append(out)
+        if flags.get('archive_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_archive_stream(src, out, src.stem, target)
+            outputs.append(out)
+        if flags.get('archive_pdf'):
+            out = unique_path(out_dir / f'{src.stem}.pdf')
+            _cuma_11001_create_pdf_from_image_iter(_cuma_11000_iter_archive_images(src, target=target), out)
+            outputs.append(out)
+
+    elif kind == 'image':
+        if flags.get('images_pdf'):
+            out = unique_path(out_dir / f'{src.stem}.pdf')
+            _cuma_11001_create_pdf_from_image_iter(_cuma_11001_iter_image_file(src, target=None), out)
+            outputs.append(out)
+        if flags.get('images_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11000_create_image_epub_from_iter(_cuma_11001_iter_image_file(src, target=target), out, src.stem, quality)
+            outputs.append(out)
+        if flags.get('images_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11000_create_xtch_from_iter_stream(_cuma_11001_iter_image_file(src, target=target), out, src.stem, target)
+            outputs.append(out)
+
+    else:
+        raise RuntimeError('Formato não suportado. Use PDF, EPUB, CBZ/ZIP, CBR/RAR/7Z ou imagens.')
+
+    return outputs
+
+
+def _cuma_11001_add_xteink_path(self, path: Path) -> bool:
+    path = Path(path)
+    if path.is_dir():
+        added = False
+        exts = ('.pdf', '.epub') + CUMA_11001_ARCHIVE_EXTS + CUMA_11001_IMAGE_EXTS
+        for f in sorted(path.rglob('*'), key=lambda p: _cuma_11000_natural_key(p.as_posix())):
+            if f.is_file() and f.suffix.lower() in exts:
+                added = _cuma_11001_add_xteink_path(self, f) or added
+        _cuma_11001_refresh_conversion_options(self)
+        return added
+
+    if path.suffix.lower() not in ('.pdf', '.epub') + CUMA_11001_ARCHIVE_EXTS + CUMA_11001_IMAGE_EXTS:
+        return False
+    if not path.exists() or path in getattr(self, 'xteink_files', []):
+        return False
+
+    self.xteink_files.append(path)
+    iid = _cuma_11008_path_key(path)
+    kind = _cuma_11001_kind_for_path(path)
+    tipo = {'pdf': 'PDF', 'epub': 'EPUB', 'archive': path.suffix.upper().lstrip('.'), 'image': 'IMG'}.get(kind, path.suffix.upper().lstrip('.'))
+    if not self.xteink_tree.exists(iid):
+        self.xteink_tree.insert('', 'end', iid=iid, values=(path.name, 'Aguardando', tipo, '', ''))
+    self.xteink_input.set(str(path))
+    try:
+        self.xteink_tree.selection_set(iid)
+        self.xteink_tree.focus(iid)
+    except Exception:
+        pass
+    try:
+        self.update_xteink_counter()
+    except Exception:
+        pass
+    _cuma_11001_refresh_conversion_options(self)
+    return True
+
+
+def _cuma_11001_add_xteink_files(self) -> None:
+    files = filedialog.askopenfilenames(
+        title='Adicionar arquivos para conversão',
+        filetypes=[
+            ('Compatíveis', '*.pdf *.epub *.cbz *.zip *.cbr *.rar *.7z *.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff'),
+            ('PDF', '*.pdf'),
+            ('EPUB', '*.epub'),
+            ('Compactados', '*.cbz *.zip *.cbr *.rar *.7z'),
+            ('Imagens', '*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff'),
+            ('Todos', '*.*'),
+        ],
+    )
+    for f in sorted(files, key=_cuma_11000_natural_key):
+        self.add_xteink_path(Path(f))
+    _cuma_11001_refresh_conversion_options(self)
+
+
+def _cuma_11001_process_xteink_paths_async(self, paths: list[Path]) -> None:
+    if not paths:
+        messagebox.showwarning('Converter', 'Adicione ou selecione arquivos compatíveis.')
+        return
+    if getattr(self, '_xteink_async_queue', None) is not None or getattr(self, 'processing', False):
+        return
+
+    base = _cuma_sync_converter_model(self)
+    flags = _cuma_11001_flags(self)
+    self.pause_event.set()
+    self.cancel_requested = False
+    self.processing = True
+    self._xteink_batch_mode = True
+    self._xteink_last_out_dir = str(base)
+    self._xteink_async_queue = queue.Queue()
+
+    try:
+        self.xteink_total_prog['maximum'] = len(paths)
+        self.xteink_total_prog['value'] = 0
+        self.xteink_current_prog['value'] = 0
+        self.xteink_cancel_btn.configure(state='normal')
+        self.xteink_pause_btn.configure(state='normal')
+        self.xteink_play_btn.configure(state='normal')
+    except Exception as exc:
+        _cuma_11001_log('Preparação visual do lote Converter', exc)
+
+    src_list = [Path(p) for p in paths]
+    target = self.xteink_target()
+    try:
+        quality = int(getattr(self, 'xteink_quality').get())
+    except Exception:
+        quality = 92
+
+    def worker():
+        last_out_dir = str(base)
+        try:
+            for idx, src in enumerate(src_list, 1):
+                if self.cancel_requested:
+                    break
+                while not self.pause_event.is_set() and not self.cancel_requested:
+                    time.sleep(0.10)
+                self._xteink_async_queue.put({'kind': 'item_start', 'src': str(src), 'index': idx, 'total': len(src_list), 'status': _cuma_11001_status_for_src(src, flags)})
+                try:
+                    outputs = _cuma_11001_run_xteink_job(src, base, target, quality, flags)
+                    resumo = ', '.join(('PASTA' if p.is_dir() else p.suffix.upper().lstrip('.')) for p in outputs) if outputs else 'Nenhuma opção marcada compatível'
+                    status = 'OK' if outputs else 'IGNORADO'
+                    saida = str(outputs[-1].parent if outputs and not outputs[-1].is_dir() else outputs[-1] if outputs else base)
+                    last_out_dir = saida or last_out_dir
+                    self._xteink_async_queue.put({'kind': 'item_done', 'src': str(src), 'index': idx, 'status': status, 'saida': saida, 'resumo': resumo})
+                except Exception as exc:
+                    _cuma_11001_log(f'Processamento Converter de {src.name}', exc)
+                    self._xteink_async_queue.put({'kind': 'item_done', 'src': str(src), 'index': idx, 'status': 'ERRO', 'saida': str(base), 'resumo': friendly_error(exc)})
+            self._xteink_async_queue.put({'kind': 'batch_done', 'last_out_dir': last_out_dir})
+        except Exception as exc:
+            _cuma_11001_log('Lote Converter/worker', exc)
+            self._xteink_async_queue.put({'kind': 'batch_error', 'last_out_dir': last_out_dir, 'error': friendly_error(exc)})
+
+    threading.Thread(target=worker, daemon=True, name='CUMA-Converter-Worker').start()
+    _cuma_poll_xteink_queue(self)
+
+
+_CUMA_11001_RUNTIME = {
+    'build': App.build,
+    'setup_vars': App.setup_vars,
+    'save_current_config': App.save_current_config,
+}
+
+
+def _cuma_11001_build(self):
+    result = _CUMA_11001_RUNTIME['build'](self)
+    try:
+        _cuma_11001_reorganize_ui(self)
+    except Exception as exc:
+        _cuma_11001_log('build/reorganização UI', exc)
+    return result
+
+
+def _cuma_11001_setup_vars(self):
+    result = _CUMA_11001_RUNTIME['setup_vars'](self)
+    try:
+        _cuma_11001_setup_conversion_vars(self)
+    except Exception as exc:
+        _cuma_11001_log('setup vars conversões dinâmicas', exc)
+    return result
+
+
+def _cuma_11001_save_current_config(self, force: bool = False):
+    result = _CUMA_11001_RUNTIME['save_current_config'](self, force)
+    try:
+        if '_cuma_11000_set_processing_from_app' in globals():
+            _cuma_11000_set_processing_from_app(self)
+    except Exception as exc:
+        _cuma_11001_log('Salvar otimização 1.100.1', exc)
+    return result
+
+
+def _cuma_11001_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11001_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11001_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11001_VERSION,
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'notes': 'Reorganização Limpar/Converter e conversões dinâmicas por tipo de arquivo.'
+        }
+        if 'cuma_version_apply_globals' in globals():
+            cuma_version_apply_globals(CUMA_11001_VERSION)
+    except Exception:
+        pass
+    try:
+        state = cuma_version_load_state()
+        events = state.get('events', [])
+        if not isinstance(events, list):
+            events = []
+        if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11001_UPDATE_ID for e in events):
+            events.append({
+                'update_id': CUMA_11001_UPDATE_ID,
+                'version': CUMA_11001_VERSION,
+                'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                'scale': 'pouca',
+                'description': 'Move otimização de leitura/E-ink para Limpar, mantém perfis/metadados/prévia no Converter e adiciona conversões dinâmicas por tipo.',
+                'timestamp': datetime.now().isoformat(timespec='seconds')
+            })
+        state['events'] = events[-100:]
+        state['current_version'] = CUMA_11001_VERSION
+        state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+        cuma_version_save_state(state)
+        if '_cuma_version_write_public_files' in globals():
+            _cuma_version_write_public_files(state)
+    except Exception as exc:
+        _cuma_11001_log('Versionamento 1.100.1', exc)
+
+
+def _cuma_install_11001_reorg() -> None:
+    try:
+        _cuma_11001_force_version()
+        App.setup_vars = _cuma_11001_setup_vars
+        App.build = _cuma_11001_build
+        App.save_current_config = _cuma_11001_save_current_config
+        App.add_xteink_path = _cuma_11001_add_xteink_path
+        App.add_xteink_files = _cuma_11001_add_xteink_files
+        App.process_xteink_paths = _cuma_11001_process_xteink_paths_async
+        globals()['_cuma_converter_flags'] = _cuma_11001_flags
+        globals()['_cuma_xteink_status_for_src'] = _cuma_11001_status_for_src
+        globals()['_cuma_run_xteink_job'] = _cuma_11001_run_xteink_job
+    except Exception as exc:
+        _cuma_11001_log('Instalação patch 1.100.1', exc)
+
+
+_cuma_install_11001_reorg()
+
+
+# Chamada main movida para o fim por subpatch 1.100.1b.
+
+
+# -----------------------------------------------------------------------------
+# CUMA 1.100.1b - ajuste visual: remover checkboxes legados e posicionar Limpar.
+# -----------------------------------------------------------------------------
+
+def _cuma_11001_widget_text(widget) -> str:
+    try:
+        return str(widget.cget('text') or '')
+    except Exception:
+        return ''
+
+
+def _cuma_11001_is_treeview(widget) -> bool:
+    try:
+        return widget.winfo_class() == 'Treeview'
+    except Exception:
+        return isinstance(widget, ttk.Treeview)
+
+
+def _cuma_11001_contains_treeview(widget) -> bool:
+    try:
+        for child in widget.winfo_children():
+            if _cuma_11001_is_treeview(child) or _cuma_11001_contains_treeview(child):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _cuma_11001_find_tree_frame(tab) -> object | None:
+    try:
+        for child in tab.winfo_children():
+            if _cuma_11001_contains_treeview(child):
+                return child
+    except Exception:
+        pass
+    return None
+
+
+def _cuma_11001_remove_legacy_converter_checkbuttons(self) -> None:
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        legacy = {'PDF para EPUB', 'PDF para XTCH', 'EPUB para XTCH'}
+        stack = [tab]
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(list(widget.winfo_children()))
+            except Exception:
+                pass
+            txt = _cuma_11001_widget_text(widget)
+            try:
+                klass = widget.winfo_class()
+            except Exception:
+                klass = ''
+            if txt in legacy and (klass == 'TCheckbutton' or isinstance(widget, ttk.Checkbutton)):
+                try:
+                    widget.destroy()
+                except Exception:
+                    pass
+    except Exception as exc:
+        _cuma_11001_log('Remoção robusta dos checkboxes legados', exc)
+
+
+_CUMA_11001B_RUNTIME = {
+    'reorganize': _cuma_11001_reorganize_ui,
+}
+
+
+def _cuma_11001_reorganize_ui(self) -> None:
+    _cuma_11001_destroy_legacy_converter_optimization_panel(self)
+    _cuma_11001_remove_legacy_converter_checkbuttons(self)
+    _cuma_11001_add_clean_optimization_panel(self)
+    _cuma_11001_add_converter_dynamic_panel(self)
+    _cuma_11001_remove_legacy_converter_checkbuttons(self)
+    try:
+        if hasattr(self, 'xteink_drop'):
+            self.xteink_drop.configure(text='Arraste PDF, EPUB, CBZ/ZIP, CBR/RAR/7Z, imagens ou pastas aqui')
+    except Exception:
+        pass
+
+
+# Chamada main movida para o fim por subpatch 1.100.1c.
+
+
+# -----------------------------------------------------------------------------
+# CUMA 1.100.1c - remove também os switches compactos legados por seus rótulos.
+# -----------------------------------------------------------------------------
+
+def _cuma_11001_remove_legacy_converter_checkbuttons(self) -> None:
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        legacy = {'PDF para EPUB', 'PDF para XTCH', 'EPUB para XTCH'}
+        stack = [tab]
+        targets = []
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(list(widget.winfo_children()))
+            except Exception:
+                pass
+            txt = _cuma_11001_widget_text(widget)
+            if txt in legacy:
+                targets.append(widget)
+        for widget in targets:
+            try:
+                klass = widget.winfo_class()
+            except Exception:
+                klass = ''
+            try:
+                if klass == 'TCheckbutton' or isinstance(widget, ttk.Checkbutton):
+                    widget.destroy()
+                else:
+                    # No tema novo, alguns switches são frames compostos: label dentro do frame.
+                    parent = getattr(widget, 'master', None)
+                    if parent is not None and parent is not tab:
+                        parent.destroy()
+                    else:
+                        widget.destroy()
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11001_log('Remoção robusta dos switches legados', exc)
+
+
+# Chamada main movida para o fim por subpatch 1.100.1d.
+
+
+# -----------------------------------------------------------------------------
+# CUMA 1.100.1d - reposiciona painel Limpar imediatamente antes da lista.
+# -----------------------------------------------------------------------------
+
+_CUMA_11001D_ADD_CLEAN = _cuma_11001_add_clean_optimization_panel
+
+def _cuma_11001_add_clean_optimization_panel(self) -> None:
+    _CUMA_11001D_ADD_CLEAN(self)
+    try:
+        tab = getattr(self, 'tab_files', None)
+        if tab is None:
+            return
+        panel = None
+        for child in tab.winfo_children():
+            try:
+                if isinstance(child, ttk.LabelFrame) and 'Limpeza e otimização de leitura' in str(child.cget('text')):
+                    panel = child
+                    break
+            except Exception:
+                pass
+        before = _cuma_11001_find_tree_frame(tab)
+        if panel is not None and before is not None:
+            try:
+                panel.pack_forget()
+                panel.pack(fill='x', pady=(0, 10), before=before)
+            except Exception as exc:
+                _cuma_11001_log('Reposicionamento do painel Limpar', exc)
+    except Exception as exc:
+        _cuma_11001_log('Reposicionamento final do painel Limpar', exc)
+
+
+# Chamada main movida para o fim por subpatch 1.100.1e.
+
+
+# -----------------------------------------------------------------------------
+# CUMA 1.100.1e - reordenação via Tcl pack para garantir posição visual.
+# -----------------------------------------------------------------------------
+
+_CUMA_11001E_ADD_CLEAN = _cuma_11001_add_clean_optimization_panel
+
+def _cuma_11001_add_clean_optimization_panel(self) -> None:
+    _CUMA_11001E_ADD_CLEAN(self)
+    try:
+        tab = getattr(self, 'tab_files', None)
+        if tab is None:
+            return
+        panel = None
+        for child in tab.winfo_children():
+            try:
+                if isinstance(child, ttk.LabelFrame) and 'Limpeza e otimização de leitura' in str(child.cget('text')):
+                    panel = child
+                    break
+            except Exception:
+                pass
+        before = _cuma_11001_find_tree_frame(tab)
+        if panel is not None and before is not None:
+            try:
+                panel.tk.call('pack', 'forget', panel._w)
+                panel.tk.call('pack', 'configure', panel._w, '-fill', 'x', '-pady', '0 10', '-before', before._w)
+            except Exception as exc:
+                _cuma_11001_log('Reordenação Tcl do painel Limpar', exc)
+    except Exception as exc:
+        _cuma_11001_log('Reordenação final Tcl do painel Limpar', exc)
+
+
+
+# -----------------------------------------------------------------------------
+# CUMA 1.100.2 - Converter em modo puro: sem nova limpeza/otimização visual.
+# -----------------------------------------------------------------------------
+# Motivo:
+# A aba Limpar é a única responsável por modificar conteúdo visual: corte,
+# margens, páginas duplas, webtoon e presets E-ink. A aba Converter deve apenas
+# transformar formato. Este patch impede que o Converter reaplique os filtros
+# do bloco KCC/E-ink e impede que a prévia adicione canvas branco por perfil de
+# dispositivo quando o usuário só quer comparar a entrada real.
+
+CUMA_11002_VERSION = '1.100.2'
+CUMA_11002_UPDATE_ID = 'converter_puro_sem_relimpeza_11002'
+
+
+def _cuma_11002_log(msg: str, exc: Exception | None = None) -> None:
+    try:
+        if '_cuma_11001_log' in globals():
+            _cuma_11001_log(msg, exc)
+        elif '_cuma_11000_log' in globals():
+            _cuma_11000_log(msg, exc)
+    except Exception:
+        pass
+
+
+def _cuma_11002_iter_pdf_pages_raw(pdf_path: Path, quality_zoom: float = 2.0):
+    """Renderiza PDF para imagens sem corte, sem preset, sem página dupla e sem fit_to_target."""
+    doc = fitz.open(str(pdf_path))
+    try:
+        for page in doc:
+            pix = page.get_pixmap(matrix=fitz.Matrix(quality_zoom, quality_zoom), alpha=False)
+            yield Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+    finally:
+        doc.close()
+
+
+def _cuma_11002_iter_epub_images_raw(epub_path: Path):
+    """Extrai imagens do EPUB preservando proporção e dimensões da imagem interna."""
+    if not Path(epub_path).exists():
+        raise RuntimeError('EPUB não encontrado.')
+    with zipfile.ZipFile(epub_path, 'r') as z:
+        names = sorted(
+            [n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT],
+            key=_cuma_11000_natural_key if '_cuma_11000_natural_key' in globals() else _natural_key
+        )
+        for name in names:
+            try:
+                with z.open(name) as f:
+                    data = BytesIO(f.read())
+                im = Image.open(data).convert('RGB')
+                if im.width < 80 or im.height < 80:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+                    continue
+                yield im
+            except Exception as exc:
+                _cuma_11002_log(f'Imagem ignorada no EPUB: {name}', exc)
+
+
+def _cuma_11002_iter_archive_images_raw(archive_path: Path):
+    """Extrai imagens de CBZ/ZIP/CBR/RAR/7Z sem aplicar otimizações da aba Limpar."""
+    archive_path = Path(archive_path)
+    suffix = archive_path.suffix.lower()
+    if suffix in ('.zip', '.cbz'):
+        with zipfile.ZipFile(archive_path, 'r') as z:
+            names = _cuma_11000_archive_image_names(z) if '_cuma_11000_archive_image_names' in globals() else sorted(
+                [n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT],
+                key=_natural_key
+            )
+            for name in names:
+                try:
+                    with z.open(name) as f:
+                        data = BytesIO(f.read())
+                    im = Image.open(data).convert('RGB')
+                    if im.width < 80 or im.height < 80:
+                        try:
+                            im.close()
+                        except Exception:
+                            pass
+                        continue
+                    yield im
+                except Exception as exc:
+                    _cuma_11002_log(f'Imagem ignorada no compactado: {name}', exc)
+    elif suffix in ('.cbr', '.rar', '.7z'):
+        with tempfile.TemporaryDirectory(prefix='cuma_archive_raw_') as td:
+            files = _cuma_11000_extract_with_7z(archive_path, Path(td))
+            for p in files:
+                try:
+                    with Image.open(p) as im:
+                        rgb = im.convert('RGB')
+                    if rgb.width < 80 or rgb.height < 80:
+                        try:
+                            rgb.close()
+                        except Exception:
+                            pass
+                        continue
+                    yield rgb
+                except Exception as exc:
+                    _cuma_11002_log(f'Imagem ignorada no compactado: {p.name}', exc)
+    else:
+        raise RuntimeError('Arquivo compactado não suportado. Use CBZ, ZIP, CBR, RAR ou 7Z.')
+
+
+def _cuma_11002_iter_image_file_raw(path: Path):
+    """Abre imagem individual sem aplicar filtros da aba Limpar."""
+    with Image.open(path) as im:
+        yield im.convert('RGB')
+
+
+def _cuma_11002_iter_source_images_raw(src: Path):
+    """Iterador central do Converter: fonte sempre pura, sem reprocessamento visual."""
+    src = Path(src)
+    suffix = src.suffix.lower()
+    kind = _cuma_11001_kind_for_path(src) if '_cuma_11001_kind_for_path' in globals() else ''
+    if kind == 'pdf' or suffix == '.pdf':
+        yield from _cuma_11002_iter_pdf_pages_raw(src)
+    elif kind == 'epub' or suffix == '.epub':
+        yield from _cuma_11002_iter_epub_images_raw(src)
+    elif kind == 'archive' or suffix in ('.cbz', '.zip', '.cbr', '.rar', '.7z'):
+        yield from _cuma_11002_iter_archive_images_raw(src)
+    elif kind == 'image' or suffix in SUPPORTED_IMAGE_EXT:
+        yield from _cuma_11002_iter_image_file_raw(src)
+    else:
+        raise RuntimeError('Formato não suportado para gerar imagens.')
+
+
+def _cuma_11002_create_epub_from_raw_iter(src: Path, output_epub: Path, title: str, quality: int = 92) -> None:
+    return _cuma_11000_create_image_epub_from_iter(_cuma_11002_iter_source_images_raw(src), output_epub, title, quality)
+
+
+def _cuma_11002_create_xtch_from_raw_iter(src: Path, output_xtch: Path, title: str, target: tuple[int, int]) -> None:
+    # XTCH/XTH exige dimensões fixas do dispositivo no contêiner. Aqui a única
+    # adaptação é a etapa obrigatória do formato; corte/preset/divisão não são aplicados.
+    return _cuma_11000_create_xtch_from_iter_stream(_cuma_11002_iter_source_images_raw(src), output_xtch, title, target)
+
+
+def _cuma_11002_run_xteink_job(src: Path, out_dir: Path, target: tuple[int, int], quality: int, flags: dict) -> list[Path]:
+    """Conversão pura: não chama _cuma_11000_process_source_image nem fit_to_target antes da saída."""
+    outputs = []
+    src = Path(src)
+    out_dir = Path(out_dir)
+    kind = _cuma_11001_kind_for_path(src) if '_cuma_11001_kind_for_path' in globals() else src.suffix.lower().lstrip('.')
+
+    if kind == 'pdf':
+        if flags.get('pdf_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11002_create_epub_from_raw_iter(src, out, src.stem, quality)
+            outputs.append(out)
+        if flags.get('pdf_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11002_create_xtch_from_raw_iter(src, out, src.stem, target)
+            outputs.append(out)
+        if flags.get('pdf_cbz'):
+            out = unique_path(out_dir / f'{src.stem}.cbz')
+            _cuma_11001_create_cbz_from_image_iter(_cuma_11002_iter_pdf_pages_raw(src), out, quality)
+            outputs.append(out)
+        if flags.get('pdf_images'):
+            out_folder = _cuma_11001_export_images_from_iter(_cuma_11002_iter_pdf_pages_raw(src), out_dir, src.stem, quality)
+            outputs.append(out_folder)
+
+    elif kind == 'epub':
+        if flags.get('epub_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11002_create_xtch_from_raw_iter(src, out, src.stem, target)
+            outputs.append(out)
+        if flags.get('epub_pdf'):
+            out = unique_path(out_dir / f'{src.stem}.pdf')
+            _cuma_11001_create_pdf_from_image_iter(_cuma_11002_iter_epub_images_raw(src), out)
+            outputs.append(out)
+
+    elif kind == 'archive':
+        if flags.get('archive_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11002_create_epub_from_raw_iter(src, out, src.stem, quality)
+            outputs.append(out)
+        if flags.get('archive_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11002_create_xtch_from_raw_iter(src, out, src.stem, target)
+            outputs.append(out)
+        if flags.get('archive_pdf'):
+            out = unique_path(out_dir / f'{src.stem}.pdf')
+            _cuma_11001_create_pdf_from_image_iter(_cuma_11002_iter_archive_images_raw(src), out)
+            outputs.append(out)
+
+    elif kind == 'image':
+        if flags.get('images_pdf'):
+            out = unique_path(out_dir / f'{src.stem}.pdf')
+            _cuma_11001_create_pdf_from_image_iter(_cuma_11002_iter_image_file_raw(src), out)
+            outputs.append(out)
+        if flags.get('images_epub'):
+            out = unique_path(out_dir / f'{src.stem}_xteink.epub')
+            _cuma_11002_create_epub_from_raw_iter(src, out, src.stem, quality)
+            outputs.append(out)
+        if flags.get('images_xtch'):
+            out = unique_path(out_dir / f'{src.stem}.xtch')
+            _cuma_11002_create_xtch_from_raw_iter(src, out, src.stem, target)
+            outputs.append(out)
+
+    else:
+        raise RuntimeError('Formato não suportado. Use PDF, EPUB, CBZ/ZIP, CBR/RAR/7Z ou imagens.')
+
+    return outputs
+
+
+def _cuma_11002_selected_converter_path(self) -> Path | None:
+    try:
+        if hasattr(self, 'xteink_tree') and self.xteink_tree.selection():
+            selected = set(self.xteink_tree.selection())
+            for p in getattr(self, 'xteink_files', []):
+                if _cuma_11008_path_key(p) in selected:
+                    return Path(p)
+    except Exception:
+        pass
+    try:
+        paths = self.xteink_selected_paths()
+        if paths:
+            return Path(paths[0])
+    except Exception:
+        pass
+    files = getattr(self, 'xteink_files', [])
+    return Path(files[0]) if files else None
+
+
+def _cuma_11002_first_source_image_raw(path: Path):
+    try:
+        return next(_cuma_11002_iter_source_images_raw(path))
+    except StopIteration:
+        return None
+
+
+def _cuma_11002_open_before_after_preview(self) -> None:
+    """Prévia temática sem aplicar fit do dispositivo. Mostra o efeito real das opções da aba Limpar."""
+    try:
+        src = _cuma_11002_selected_converter_path(self)
+        if not src:
+            messagebox.showinfo('Prévia antes/depois', 'Selecione um item para pré-visualizar.')
+            return
+
+        original = _cuma_11002_first_source_image_raw(src)
+        if original is None:
+            messagebox.showwarning('Prévia antes/depois', 'Não consegui abrir uma imagem de prévia para este arquivo.')
+            return
+
+        # A prévia da aba Limpar mostra apenas filtros visuais. Nada de target/dispositivo aqui.
+        settings = _cuma_11000_app_processing_settings(self) if '_cuma_11000_app_processing_settings' in globals() else {}
+        processed_pages = _cuma_11000_process_source_image(original.copy(), None, settings) if '_cuma_11000_process_source_image' in globals() else [original.copy()]
+        processed = processed_pages[0] if processed_pages else original.copy()
+
+        top = tk.Toplevel(self.root)
+        top.title('Prévia antes/depois - CUMA 1.100.2')
+        top.geometry('980x680')
+        try:
+            pal = getattr(self, '_theme_palette', {}) or {}
+            top.configure(bg=pal.get('bg', '#0F1318'))
+        except Exception:
+            pass
+
+        wrap = ttk.Frame(top, style='Card.TFrame', padding=14)
+        wrap.pack(fill='both', expand=True)
+        ttk.Label(wrap, text='Prévia antes/depois', style='TitleSmall.TLabel').pack(anchor='w', pady=(0, 6))
+        ttk.Label(
+            wrap,
+            text=f'{src.name}  •  Preset: {settings.get("image_preset", "Original")}  •  Leitura: {settings.get("reading_order", "Ocidental")}  •  Sem encaixe de dispositivo',
+            style='Muted.TLabel'
+        ).pack(anchor='w', pady=(0, 12))
+
+        grid = ttk.Frame(wrap, style='Card.TFrame')
+        grid.pack(fill='both', expand=True)
+        left = ttk.Frame(grid, style='Card.TFrame')
+        right = ttk.Frame(grid, style='Card.TFrame')
+        left.pack(side='left', fill='both', expand=True, padx=(0, 8))
+        right.pack(side='left', fill='both', expand=True, padx=(8, 0))
+        ttk.Label(left, text='Original', style='Strong.TLabel').pack(anchor='center')
+        ttk.Label(right, text='Processado pela aba Limpar', style='Strong.TLabel').pack(anchor='center')
+
+        photo1 = _cuma_11000_photo_for_preview(original)
+        photo2 = _cuma_11000_photo_for_preview(processed)
+        lbl1 = ttk.Label(left, image=photo1)
+        lbl2 = ttk.Label(right, image=photo2)
+        lbl1.image = photo1
+        lbl2.image = photo2
+        lbl1.pack(expand=True, pady=8)
+        lbl2.pack(expand=True, pady=8)
+
+        ttk.Label(
+            wrap,
+            text='Esta prévia não usa perfil de dispositivo e não adiciona canvas branco. O Converter trabalha com o arquivo já preparado; ajustes visuais ficam na aba Limpar.',
+            style='Muted.TLabel',
+            wraplength=900,
+            justify='left'
+        ).pack(anchor='w', pady=(10, 0))
+        ttk.Button(wrap, text='Fechar', command=top.destroy, style='Accent.TButton').pack(anchor='e', pady=(12, 0))
+    except Exception as exc:
+        _cuma_11002_log('Falha na prévia antes/depois 1.100.2', exc)
+        messagebox.showerror('Prévia antes/depois', friendly_error(exc))
+
+
+def _cuma_11002_open_converter_preview(self) -> None:
+    """Prévia da aba Converter: conversão pura, sem reprocessar a página."""
+    try:
+        src = _cuma_11002_selected_converter_path(self)
+        if not src:
+            messagebox.showwarning('Prévia', 'Selecione ou adicione um arquivo compatível.')
+            return
+        original = _cuma_11002_first_source_image_raw(src)
+        if original is None:
+            messagebox.showwarning('Prévia', 'Não consegui abrir uma imagem de prévia para este arquivo.')
+            return
+        processed = original.copy()
+
+        top = tk.Toplevel(self.root)
+        top.title('Prévia do Converter - CUMA 1.100.2')
+        top.geometry('980x680')
+        try:
+            pal = getattr(self, '_theme_palette', {}) or {}
+            top.configure(bg=pal.get('bg', '#0F1318'))
+        except Exception:
+            pass
+
+        wrap = ttk.Frame(top, style='Card.TFrame', padding=14)
+        wrap.pack(fill='both', expand=True)
+        ttk.Label(wrap, text='Prévia do Converter', style='TitleSmall.TLabel').pack(anchor='w', pady=(0, 6))
+        ttk.Label(
+            wrap,
+            text=f'{src.name}  •  Conversão pura: sem corte, sem divisão, sem webtoon e sem preset E-ink.',
+            style='Muted.TLabel',
+            wraplength=900,
+            justify='left'
+        ).pack(anchor='w', pady=(0, 12))
+
+        grid = ttk.Frame(wrap, style='Card.TFrame')
+        grid.pack(fill='both', expand=True)
+        left = ttk.Frame(grid, style='Card.TFrame')
+        right = ttk.Frame(grid, style='Card.TFrame')
+        left.pack(side='left', fill='both', expand=True, padx=(0, 8))
+        right.pack(side='left', fill='both', expand=True, padx=(8, 0))
+        ttk.Label(left, text='Entrada selecionada', style='Strong.TLabel').pack(anchor='center')
+        ttk.Label(right, text='Como será enviado ao conversor', style='Strong.TLabel').pack(anchor='center')
+
+        photo1 = _cuma_11000_photo_for_preview(original)
+        photo2 = _cuma_11000_photo_for_preview(processed)
+        lbl1 = ttk.Label(left, image=photo1)
+        lbl2 = ttk.Label(right, image=photo2)
+        lbl1.image = photo1
+        lbl2.image = photo2
+        lbl1.pack(expand=True, pady=8)
+        lbl2.pack(expand=True, pady=8)
+
+        ttk.Label(
+            wrap,
+            text='Se precisar remover margem, dividir página dupla, tratar webtoon ou aplicar E-ink, faça isso antes na aba Limpar. A aba Converter não altera estruturalmente o arquivo.',
+            style='Muted.TLabel',
+            wraplength=900,
+            justify='left'
+        ).pack(anchor='w', pady=(10, 0))
+        ttk.Button(wrap, text='Fechar', command=top.destroy, style='Accent.TButton').pack(anchor='e', pady=(12, 0))
+    except Exception as exc:
+        _cuma_11002_log('Falha na prévia do Converter 1.100.2', exc)
+        messagebox.showerror('Prévia', friendly_error(exc))
+
+
+def _cuma_11002_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11002_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11002_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11002_VERSION,
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'notes': 'Converter agora trabalha em modo puro: não reaplica limpeza, presets, páginas duplas, webtoon nem encaixe de dispositivo em EPUB/CBZ/imagens/PDF.'
+        }
+        if 'cuma_version_apply_globals' in globals():
+            cuma_version_apply_globals(CUMA_11002_VERSION)
+    except Exception:
+        pass
+    try:
+        state = cuma_version_load_state()
+        events = state.get('events', [])
+        if not isinstance(events, list):
+            events = []
+        if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11002_UPDATE_ID for e in events):
+            events.append({
+                'update_id': CUMA_11002_UPDATE_ID,
+                'version': CUMA_11002_VERSION,
+                'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                'scale': 'pouca',
+                'description': 'Garante separação total: Limpar modifica conteúdo; Converter apenas troca formato sem reprocessar visualmente.',
+                'timestamp': datetime.now().isoformat(timespec='seconds')
+            })
+        state['events'] = events[-100:]
+        state['current_version'] = CUMA_11002_VERSION
+        state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+        cuma_version_save_state(state)
+        if '_cuma_version_write_public_files' in globals():
+            _cuma_version_write_public_files(state)
+    except Exception as exc:
+        _cuma_11002_log('Versionamento 1.100.2', exc)
+
+
+def _cuma_install_11002_converter_puro() -> None:
+    try:
+        _cuma_11002_force_version()
+        # O worker 1.100.1 chama este nome global; trocar o alvo corrige o lote inteiro.
+        globals()['_cuma_11001_run_xteink_job'] = _cuma_11002_run_xteink_job
+        globals()['_cuma_run_xteink_job'] = _cuma_11002_run_xteink_job
+        globals()['_cuma_11000_open_before_after_preview'] = _cuma_11002_open_before_after_preview
+        App.open_xteink_preview = _cuma_11002_open_converter_preview
+    except Exception as exc:
+        _cuma_11002_log('Instalação patch 1.100.2', exc)
+
+
+_cuma_install_11002_converter_puro()
+
+
+
+
+# ---------------------------------------------------------------------------
+# CUMA 1.100.3 - Integração real da otimização na aba Limpar + Converter mais limpo
+# ---------------------------------------------------------------------------
+CUMA_11003_VERSION = '1.100.3'
+CUMA_11003_UPDATE_ID = 'limpar_kcc_real_converter_preview_unificada_11003'
+
+
+def _cuma_11003_log(msg: str, exc: Exception | None = None) -> None:
+    try:
+        if '_cuma_11002_log' in globals():
+            _cuma_11002_log(msg, exc)
+        elif '_cuma_11001_log' in globals():
+            _cuma_11001_log(msg, exc)
+        else:
+            write_log(f'{msg}: {exc}' if exc else msg)
+    except Exception:
+        pass
+
+
+def _cuma_11003_processing_active(settings: dict | None = None) -> bool:
+    """Retorna True somente quando a aba Limpar tem alguma transformação visual ativa."""
+    try:
+        data = settings if isinstance(settings, dict) else (
+            _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
+        )
+        preset = str(data.get('image_preset') or 'Original')
+        return bool(
+            data.get('auto_crop')
+            or data.get('remove_page_numbers')
+            or data.get('split_double_pages')
+            or data.get('webtoon_split')
+            or preset != 'Original'
+        )
+    except Exception:
+        return False
+
+
+def _cuma_11003_page_to_image(page: fitz.Page) -> Image.Image:
+    """Extrai a imagem principal da página limpa quando possível; fallback renderiza a página."""
+    try:
+        blocks = [b for b in page.get_text('dict').get('blocks', []) if b.get('type') == 1 and b.get('image')]
+        if blocks:
+            block = max(blocks, key=lambda b: int(b.get('width', 0)) * int(b.get('height', 0)))
+            raw = block.get('image')
+            if raw:
+                return Image.open(BytesIO(raw)).convert('RGB')
+    except Exception as exc:
+        _cuma_11003_log('Extração direta da imagem da página limpa ignorada', exc)
+    try:
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+        return Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+    except Exception:
+        pix = page.get_pixmap(alpha=False)
+        return Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+
+
+def _cuma_11003_insert_image_page(doc: fitz.Document, im: Image.Image, quality: int = 94) -> None:
+    rgb = im.convert('RGB')
+    bio = BytesIO()
+    rgb.save(bio, format='JPEG', quality=int(max(50, min(100, quality or 94))), optimize=True)
+    page = doc.new_page(width=max(1, rgb.width), height=max(1, rgb.height))
+    page.insert_image(page.rect, stream=bio.getvalue(), keep_proportion=False)
+
+
+def _cuma_11003_process_clean_pdf_in_place(pdf_path: Path, settings: dict | None = None, cancel=None) -> dict:
+    """Aplica as opções da aba Limpar no PDF já limpo.
+
+    Esta etapa é propositalmente exclusiva da aba Limpar. O Converter permanece em
+    conversão pura e não chama este fluxo.
+    """
+    pdf_path = Path(pdf_path)
+    data = settings if isinstance(settings, dict) else (
+        _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
+    )
+    stats = {
+        'input_pages': 0,
+        'output_pages': 0,
+        'double_pages_split': 0,
+        'webtoon_segments': 0,
+        'active': _cuma_11003_processing_active(data),
+    }
+    if not stats['active'] or not pdf_path.exists() or pdf_path.suffix.lower() != '.pdf':
+        return stats
+
+    src = out = None
+    tmp = pdf_path.with_suffix('.cuma_opt.tmp.pdf')
+    try:
+        src = fitz.open(str(pdf_path))
+        out = fitz.open()
+        stats['input_pages'] = len(src)
+        for idx, page in enumerate(src, 1):
+            if cancel and cancel():
+                raise RuntimeError('Processamento cancelado pelo usuário.')
+            original = _cuma_11003_page_to_image(page)
+            ow, oh = original.size
+            produced = []
+            try:
+                if '_cuma_11000_process_source_image' in globals():
+                    produced = _cuma_11000_process_source_image(original, None, data)
+                else:
+                    produced = [original]
+            except Exception as exc:
+                _cuma_11003_log(f'Otimização Limpar ignorada na página {idx}', exc)
+                produced = [original]
+            if not produced:
+                produced = [original]
+            if len(produced) > 1 and data.get('split_double_pages') and ow / max(1, oh) >= 1.22:
+                stats['double_pages_split'] += 1
+            if len(produced) > 1 and data.get('webtoon_split') and oh / max(1, ow) > float(data.get('webtoon_max_ratio', 2.8) or 2.8):
+                stats['webtoon_segments'] += max(0, len(produced) - 1)
+            for im in produced:
+                try:
+                    _cuma_11003_insert_image_page(out, im, quality=94)
+                    stats['output_pages'] += 1
+                finally:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+            try:
+                if original not in produced:
+                    original.close()
+            except Exception:
+                pass
+
+        if stats['output_pages'] <= 0:
+            raise RuntimeError('A otimização da aba Limpar não gerou páginas.')
+        tmp.unlink(missing_ok=True)
+        out.save(str(tmp), garbage=4, deflate=True, clean=True)
+        src.close(); src = None
+        out.close(); out = None
+        pdf_path.unlink(missing_ok=True)
+        tmp.replace(pdf_path)
+        return stats
+    finally:
+        for doc in (src, out):
+            try:
+                if doc is not None:
+                    doc.close()
+            except Exception:
+                pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+_CUMA_11003_ORIGINAL_PDF_CLEAN = getattr(PDFCleaner, 'clean', None)
+
+
+def _cuma_11003_pdf_clean(self, source: Path, output_pdf: Path, progress=None, cancel=None) -> Result:
+    result = _CUMA_11003_ORIGINAL_PDF_CLEAN(self, source, output_pdf, progress=progress, cancel=cancel)
+    try:
+        settings = _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
+        out_path = Path(getattr(result, 'output', '') or '')
+        if out_path.exists() and out_path.suffix.lower() == '.pdf' and _cuma_11003_processing_active(settings):
+            before_pages = int(getattr(result, 'final_pages', 0) or 0)
+            stats = _cuma_11003_process_clean_pdf_in_place(out_path, settings=settings, cancel=cancel)
+            if stats.get('output_pages'):
+                result.final_pages = int(stats.get('output_pages') or result.final_pages)
+                try:
+                    result.final_size = out_path.stat().st_size
+                except Exception:
+                    pass
+                try:
+                    result.saved_bytes = max(0, int(result.original_size or 0) - int(result.final_size or 0))
+                except Exception:
+                    pass
+                extras = []
+                if str(getattr(result, 'extra_outputs', '') or '').strip():
+                    extras.append(str(result.extra_outputs))
+                if stats.get('double_pages_split'):
+                    extras.append(f"páginas duplas divididas: {stats.get('double_pages_split')}")
+                if stats.get('webtoon_segments'):
+                    extras.append(f"segmentos webtoon: {stats.get('webtoon_segments')}")
+                result.extra_outputs = ' | '.join(extras)
+                mode = str(getattr(result, 'mode', '') or '')
+                suffix = ' + otimização Limpar'
+                if suffix not in mode:
+                    result.mode = mode + suffix
+                if before_pages and result.final_pages != before_pages:
+                    result.mode = str(result.mode) + f' ({before_pages}→{result.final_pages} págs.)'
+    except Exception as exc:
+        _cuma_11003_log('Otimização pós-Limpar ignorada', exc)
+    return result
+
+
+def _cuma_11003_selected_clean_source(self) -> Path | None:
+    try:
+        selected = self.selected_paths()
+        if selected:
+            return Path(selected[0])
+    except Exception:
+        pass
+    try:
+        files = list(getattr(self, 'files', []) or [])
+        if files:
+            return Path(files[0])
+    except Exception:
+        pass
+    return None
+
+
+def _cuma_11003_open_clean_preview(self) -> None:
+    """Prévia da aba Limpar: mostra o efeito real dos controles KCC/E-ink antes de processar."""
+    try:
+        src = _cuma_11003_selected_clean_source(self)
+        if not src:
+            messagebox.showwarning('Prévia Limpar', 'Adicione ou selecione um PDF na aba Limpar.')
+            return
+        if src.suffix.lower() != '.pdf':
+            messagebox.showwarning('Prévia Limpar', 'A prévia da aba Limpar usa arquivos PDF.')
+            return
+        doc = fitz.open(str(src))
+        try:
+            if len(doc) <= 0:
+                messagebox.showwarning('Prévia Limpar', 'PDF sem páginas.')
+                return
+            original = _cuma_11003_page_to_image(doc[0])
+        finally:
+            doc.close()
+        settings = _cuma_11000_app_processing_settings(self) if '_cuma_11000_app_processing_settings' in globals() else {}
+        processed_pages = _cuma_11000_process_source_image(original.copy(), None, settings) if '_cuma_11000_process_source_image' in globals() else [original.copy()]
+        processed = processed_pages[0] if processed_pages else original.copy()
+        top = tk.Toplevel(self.root)
+        top.title('Prévia Limpar - CUMA 1.100.3')
+        top.geometry('980x680')
+        try:
+            pal = getattr(self, '_theme_palette', {}) or {}
+            top.configure(bg=pal.get('bg', '#0F1318'))
+        except Exception:
+            pass
+        wrap = ttk.Frame(top, style='Card.TFrame', padding=14)
+        wrap.pack(fill='both', expand=True)
+        ttk.Label(wrap, text='Prévia da aba Limpar', style='TitleSmall.TLabel').pack(anchor='w', pady=(0, 6))
+        info = f'{src.name}  •  Preset: {settings.get("image_preset")}  •  Leitura: {settings.get("reading_order")}'
+        if len(processed_pages) > 1:
+            info += f'  •  Saída desta página: {len(processed_pages)} páginas'
+        ttk.Label(wrap, text=info, style='Muted.TLabel').pack(anchor='w', pady=(0, 12))
+        grid = ttk.Frame(wrap, style='Card.TFrame')
+        grid.pack(fill='both', expand=True)
+        left = ttk.Frame(grid, style='Card.TFrame'); right = ttk.Frame(grid, style='Card.TFrame')
+        left.pack(side='left', fill='both', expand=True, padx=(0, 8)); right.pack(side='left', fill='both', expand=True, padx=(8, 0))
+        ttk.Label(left, text='Original', style='Strong.TLabel').pack(anchor='center')
+        ttk.Label(right, text='Processado pela aba Limpar', style='Strong.TLabel').pack(anchor='center')
+        photo1 = _cuma_11000_photo_for_preview(original) if '_cuma_11000_photo_for_preview' in globals() else ImageTk.PhotoImage(original)
+        photo2 = _cuma_11000_photo_for_preview(processed) if '_cuma_11000_photo_for_preview' in globals() else ImageTk.PhotoImage(processed)
+        lbl1 = ttk.Label(left, image=photo1); lbl2 = ttk.Label(right, image=photo2)
+        lbl1.image = photo1; lbl2.image = photo2
+        lbl1.pack(expand=True, pady=8); lbl2.pack(expand=True, pady=8)
+        ttk.Label(wrap, text='Esta prévia representa as opções da aba Limpar. O Converter não reaplica estas alterações.', style='Muted.TLabel', wraplength=900, justify='left').pack(anchor='w', pady=(10, 0))
+        ttk.Button(wrap, text='Fechar', command=top.destroy, style='Accent.TButton').pack(anchor='e', pady=(12, 0))
+        try:
+            original.close()
+            for im in processed_pages:
+                im.close()
+        except Exception:
+            pass
+    except Exception as exc:
+        _cuma_11003_log('Falha na prévia da aba Limpar', exc)
+        messagebox.showerror('Prévia Limpar', friendly_error(exc))
+
+
+def _cuma_11003_add_clean_optimization_panel(self) -> None:
+    """Recria o painel da aba Limpar com opções que realmente entram no fluxo de limpeza."""
+    try:
+        tab = getattr(self, 'tab_files', None)
+        if tab is None:
+            return
+        for child in list(tab.winfo_children()):
+            try:
+                text = str(child.cget('text')) if isinstance(child, ttk.LabelFrame) else ''
+                if 'Limpeza e otimização' in text or 'Otimização de leitura' in text or 'Limpar: preparação' in text:
+                    child.destroy()
+            except Exception:
+                pass
+
+        settings = _cuma_11000_app_processing_settings(self) if '_cuma_11000_app_processing_settings' in globals() else {}
+
+        if not hasattr(self, 'cuma_reading_order'):
+            self.cuma_reading_order = tk.StringVar(value=settings.get('reading_order', 'Ocidental'))
+        if not hasattr(self, 'cuma_image_preset'):
+            self.cuma_image_preset = tk.StringVar(value=settings.get('image_preset', 'Original'))
+        if not hasattr(self, 'cuma_auto_crop'):
+            self.cuma_auto_crop = tk.BooleanVar(value=bool(settings.get('auto_crop', False)))
+        if not hasattr(self, 'cuma_auto_crop_strength'):
+            self.cuma_auto_crop_strength = tk.StringVar(value=settings.get('auto_crop_strength', 'Normal'))
+        if not hasattr(self, 'cuma_remove_page_numbers'):
+            self.cuma_remove_page_numbers = tk.BooleanVar(value=bool(settings.get('remove_page_numbers', False)))
+        if not hasattr(self, 'cuma_split_double_pages'):
+            self.cuma_split_double_pages = tk.BooleanVar(value=bool(settings.get('split_double_pages', False)))
+        if not hasattr(self, 'cuma_split_keep_original'):
+            self.cuma_split_keep_original = tk.BooleanVar(value=bool(settings.get('split_keep_original', False)))
+        if not hasattr(self, 'cuma_webtoon_split'):
+            self.cuma_webtoon_split = tk.BooleanVar(value=bool(settings.get('webtoon_split', False)))
+
+        before = _cuma_11001_find_tree_frame(tab) if '_cuma_11001_find_tree_frame' in globals() else None
+        kwargs = {'fill': 'x', 'pady': (0, 10)}
+        if before is not None:
+            kwargs['before'] = before
+
+        panel = ttk.LabelFrame(tab, text='Limpar: preparação visual das páginas', padding=12, style='Card.TLabelframe')
+        panel.pack(**kwargs)
+
+        ttk.Label(panel, text='Estas opções são aplicadas ao clicar em Processar na aba Limpar. O Converter apenas usa o arquivo já limpo.', style='Muted.TLabel', wraplength=1050, justify='left').grid(row=0, column=0, columnspan=7, sticky='w', pady=(0, 8))
+
+        ttk.Label(panel, text='Ordem', style='Muted.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 8), pady=4)
+        cb_order = ttk.Combobox(panel, textvariable=self.cuma_reading_order, values=globals().get('CUMA_11000_READING_ORDERS', ('Ocidental', 'Mangá')), state='readonly', width=12)
+        cb_order.grid(row=1, column=1, sticky='w', pady=4)
+
+        ttk.Label(panel, text='Preset E-ink', style='Muted.TLabel').grid(row=1, column=2, sticky='w', padx=(18, 8), pady=4)
+        cb_preset = ttk.Combobox(panel, textvariable=self.cuma_image_preset, values=globals().get('CUMA_11000_IMAGE_PRESETS', ('Original',)), state='readonly', width=24)
+        cb_preset.grid(row=1, column=3, sticky='w', pady=4)
+
+        ttk.Label(panel, text='Corte', style='Muted.TLabel').grid(row=1, column=4, sticky='w', padx=(18, 8), pady=4)
+        cb_crop = ttk.Combobox(panel, textvariable=self.cuma_auto_crop_strength, values=globals().get('CUMA_11000_CROP_STRENGTHS', ('Suave', 'Normal', 'Forte')), state='readonly', width=10)
+        cb_crop.grid(row=1, column=5, sticky='w', pady=4)
+
+        def save_processing():
+            try:
+                _cuma_11000_set_processing_from_app(self)
+            except Exception as exc:
+                _cuma_11003_log('Salvar opções da aba Limpar', exc)
+            try:
+                self.save_current_config()
+            except Exception:
+                pass
+
+        ttk.Checkbutton(panel, text='Remover margens', variable=self.cuma_auto_crop, command=save_processing).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover número/rodapé', variable=self.cuma_remove_page_numbers, command=save_processing).grid(row=2, column=2, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=save_processing).grid(row=2, column=4, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=save_processing).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Webtoon/imagens longas', variable=self.cuma_webtoon_split, command=save_processing).grid(row=3, column=2, columnspan=2, sticky='w', pady=4)
+        ttk.Button(panel, text='Prévia Limpar', command=lambda: _cuma_11003_open_clean_preview(self), style='Accent.TButton').grid(row=3, column=4, sticky='w', padx=(0, 8), pady=4)
+
+        for cb in (cb_order, cb_preset, cb_crop):
+            cb.bind('<<ComboboxSelected>>', lambda _e: save_processing())
+
+        ttk.Label(panel, text='Exemplo: se uma página estiver muito larga, ative "Dividir páginas duplas". Em leitura Mangá, a metade direita sai antes da esquerda.', style='Muted.TLabel', wraplength=1050, justify='left').grid(row=4, column=0, columnspan=7, sticky='w', pady=(8, 0))
+        panel.columnconfigure(6, weight=1)
+    except Exception as exc:
+        _cuma_11003_log('Adicionar painel Limpar 1.100.3', exc)
+
+
+def _cuma_11003_add_converter_dynamic_panel(self) -> None:
+    """Painel de conversão sem prévia duplicada; a prévia fica no botão superior do Converter."""
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        if '_cuma_11001_setup_conversion_vars' in globals():
+            _cuma_11001_setup_conversion_vars(self)
+
+        for child in list(tab.winfo_children()):
+            try:
+                if isinstance(child, ttk.LabelFrame) and str(child.cget('text')) in (
+                    'Conversões disponíveis', 'Prévia, metadados e conversões', 'Conversões compatíveis'
+                ):
+                    child.destroy()
+            except Exception:
+                pass
+
+        children = list(tab.winfo_children())
+        kwargs = {'fill': 'x', 'pady': (0, 10)}
+        if children:
+            kwargs['before'] = children[1] if len(children) > 1 else children[0]
+
+        panel = ttk.LabelFrame(tab, text='Conversões compatíveis', padding=12, style='Card.TLabelframe')
+        panel.pack(**kwargs)
+
+        top = ttk.Frame(panel, style='Card.TFrame')
+        top.grid(row=0, column=0, columnspan=4, sticky='ew')
+        ttk.Button(top, text='Metadados EPUB', command=lambda: _cuma_11000_open_metadata_editor(self), style='Ghost.TButton').pack(side='left', padx=(0, 8))
+        ttk.Label(top, text='Selecione/adicione um arquivo. O CUMA libera apenas as conversões compatíveis com o tipo detectado.', style='Muted.TLabel').pack(side='left', padx=(10, 0))
+
+        self.cuma_conversion_hint = tk.StringVar(value='Adicione ou selecione um arquivo para liberar as conversões compatíveis.')
+        ttk.Label(panel, textvariable=self.cuma_conversion_hint, style='Muted.TLabel', wraplength=1050, justify='left').grid(row=1, column=0, columnspan=4, sticky='w', pady=(10, 6))
+
+        grid = ttk.Frame(panel, style='Card.TFrame')
+        grid.grid(row=2, column=0, columnspan=4, sticky='ew')
+        self._cuma_11001_conversion_widgets = {}
+        ordered = (
+            'pdf_epub', 'pdf_xtch', 'pdf_cbz', 'pdf_images',
+            'epub_xtch', 'epub_pdf',
+            'archive_epub', 'archive_xtch', 'archive_pdf',
+            'images_pdf', 'images_epub', 'images_xtch'
+        )
+        for idx, key in enumerate(ordered):
+            var = _cuma_11001_var_for_key(self, key)
+            cb = ttk.Checkbutton(grid, text=CUMA_11001_CONVERSION_LABELS[key], variable=var)
+            cb.grid(row=idx // 4, column=idx % 4, sticky='w', padx=(0, 18), pady=4)
+            self._cuma_11001_conversion_widgets[key] = cb
+
+        try:
+            self.xteink_tree.bind('<<TreeviewSelect>>', lambda _e: _cuma_11001_refresh_conversion_options(self), add='+')
+        except Exception:
+            pass
+        try:
+            self.xteink_input.trace_add('write', lambda *_: _cuma_11001_refresh_conversion_options(self))
+        except Exception:
+            pass
+        _cuma_11001_refresh_conversion_options(self)
+    except Exception as exc:
+        _cuma_11003_log('Adicionar painel Converter 1.100.3', exc)
+
+
+def _cuma_11003_unify_converter_preview_button(self) -> None:
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        for child in tab.winfo_children():
+            try:
+                for btn in child.winfo_children():
+                    try:
+                        if isinstance(btn, ttk.Button) and str(btn.cget('text')).strip() == 'Prévia':
+                            btn.configure(text='Prévia', command=self.open_xteink_preview, style='Accent.TButton')
+                            return
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11003_log('Unificar botão de prévia do Converter', exc)
+
+
+def _cuma_11003_reorganize_ui(self) -> None:
+    try:
+        if '_cuma_11001_destroy_legacy_converter_optimization_panel' in globals():
+            _cuma_11001_destroy_legacy_converter_optimization_panel(self)
+    except Exception:
+        pass
+    try:
+        if '_cuma_11001_remove_legacy_converter_checkbuttons' in globals():
+            _cuma_11001_remove_legacy_converter_checkbuttons(self)
+    except Exception:
+        pass
+    _cuma_11003_add_clean_optimization_panel(self)
+    _cuma_11003_add_converter_dynamic_panel(self)
+    _cuma_11003_unify_converter_preview_button(self)
+    try:
+        if '_cuma_11001_remove_legacy_converter_checkbuttons' in globals():
+            _cuma_11001_remove_legacy_converter_checkbuttons(self)
+    except Exception:
+        pass
+
+
+_CUMA_11003_RUNTIME = {
+    'build': getattr(App, 'build', None),
+    'save_current_config': getattr(App, 'save_current_config', None),
+}
+
+
+def _cuma_11003_build(self):
+    result = _CUMA_11003_RUNTIME['build'](self)
+    try:
+        _cuma_11003_reorganize_ui(self)
+    except Exception as exc:
+        _cuma_11003_log('Reorganização UI 1.100.3', exc)
+    return result
+
+
+def _cuma_11003_save_current_config(self, force: bool = False):
+    result = _CUMA_11003_RUNTIME['save_current_config'](self, force)
+    try:
+        if '_cuma_11000_set_processing_from_app' in globals():
+            _cuma_11000_set_processing_from_app(self)
+    except Exception as exc:
+        _cuma_11003_log('Salvar opções Limpar 1.100.3', exc)
+    return result
+
+
+def _cuma_11003_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11003_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11003_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11003_VERSION,
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'notes': 'Integração real das opções KCC/E-ink na aba Limpar, divisão de páginas duplas no processamento e prévia do Converter sem duplicação.'
+        }
+        if 'cuma_version_apply_globals' in globals():
+            cuma_version_apply_globals(CUMA_11003_VERSION)
+    except Exception:
+        pass
+    try:
+        state = cuma_version_load_state()
+        events = state.get('events', [])
+        if not isinstance(events, list):
+            events = []
+        if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11003_UPDATE_ID for e in events):
+            events.append({
+                'update_id': CUMA_11003_UPDATE_ID,
+                'version': CUMA_11003_VERSION,
+                'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                'scale': 'pouca',
+                'description': 'Aplica páginas duplas/webtoon/presets na aba Limpar de verdade e remove a prévia duplicada do Converter.',
+                'timestamp': datetime.now().isoformat(timespec='seconds')
+            })
+        state['events'] = events[-100:]
+        state['current_version'] = CUMA_11003_VERSION
+        state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+        cuma_version_save_state(state)
+        if '_cuma_version_write_public_files' in globals():
+            _cuma_version_write_public_files(state)
+    except Exception as exc:
+        _cuma_11003_log('Versionamento 1.100.3', exc)
+
+
+def _cuma_install_11003_clean_kcc_and_preview() -> None:
+    try:
+        _cuma_11003_force_version()
+        if _CUMA_11003_ORIGINAL_PDF_CLEAN is not None:
+            PDFCleaner.clean = _cuma_11003_pdf_clean
+        App.build = _cuma_11003_build
+        App.save_current_config = _cuma_11003_save_current_config
+        App.open_cuma_clean_preview = _cuma_11003_open_clean_preview
+        # Reaproveita a prévia mais nova no botão antigo da barra superior.
+        App.open_xteink_preview = _cuma_11002_open_converter_preview if '_cuma_11002_open_converter_preview' in globals() else App.open_xteink_preview
+        globals()['_cuma_11001_add_clean_optimization_panel'] = _cuma_11003_add_clean_optimization_panel
+        globals()['_cuma_11001_add_converter_dynamic_panel'] = _cuma_11003_add_converter_dynamic_panel
+        globals()['_cuma_11001_reorganize_ui'] = _cuma_11003_reorganize_ui
+    except Exception as exc:
+        _cuma_11003_log('Instalação patch 1.100.3', exc)
+
+
+_cuma_install_11003_clean_kcc_and_preview()
+
+
+
+# -----------------------------------------------------------------------------
+# CUMA 1.100.4 - acabamento visual Limpar/Converter, metadados contextuais e limpeza de UI.
+# -----------------------------------------------------------------------------
+
+CUMA_11004_VERSION = '1.100.4'
+CUMA_11004_UPDATE_ID = 'converter_clean_ui_metadata_context_11004'
+
+
+def _cuma_11004_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        msg = f'[CUMA 1.100.4] {context}' if exc is None else f'[CUMA 1.100.4] {context}: {exc}'
+        write_log(msg)
+    except Exception:
+        pass
+
+
+def _cuma_11004_ensure_clean_vars(self) -> dict:
+    settings = _cuma_11000_app_processing_settings(self) if '_cuma_11000_app_processing_settings' in globals() else {}
+    try:
+        if not hasattr(self, 'cuma_reading_order'):
+            self.cuma_reading_order = tk.StringVar(value=settings.get('reading_order', 'Ocidental'))
+        if not hasattr(self, 'cuma_image_preset'):
+            self.cuma_image_preset = tk.StringVar(value=settings.get('image_preset', 'Original'))
+        if not hasattr(self, 'cuma_auto_crop'):
+            self.cuma_auto_crop = tk.BooleanVar(value=bool(settings.get('auto_crop', False)))
+        if not hasattr(self, 'cuma_auto_crop_strength'):
+            self.cuma_auto_crop_strength = tk.StringVar(value=settings.get('auto_crop_strength', 'Normal'))
+        if not hasattr(self, 'cuma_remove_page_numbers'):
+            self.cuma_remove_page_numbers = tk.BooleanVar(value=bool(settings.get('remove_page_numbers', False)))
+        if not hasattr(self, 'cuma_split_double_pages'):
+            self.cuma_split_double_pages = tk.BooleanVar(value=bool(settings.get('split_double_pages', False)))
+        if not hasattr(self, 'cuma_split_keep_original'):
+            self.cuma_split_keep_original = tk.BooleanVar(value=bool(settings.get('split_keep_original', False)))
+        if not hasattr(self, 'cuma_webtoon_split'):
+            self.cuma_webtoon_split = tk.BooleanVar(value=bool(settings.get('webtoon_split', False)))
+    except Exception as exc:
+        _cuma_11004_log('Garantia de variáveis da aba Limpar', exc)
+    return settings
+
+
+def _cuma_11004_save_clean_settings(self) -> None:
+    try:
+        if '_cuma_11000_set_processing_from_app' in globals():
+            _cuma_11000_set_processing_from_app(self)
+    except Exception as exc:
+        _cuma_11004_log('Salvar opções de preparação visual', exc)
+    try:
+        self.save_current_config(force=True)
+    except Exception:
+        pass
+
+
+def _cuma_11004_remove_clean_optimization_panel(self) -> None:
+    """Remove o bloco grande da aba Limpar. As opções passam a ficar em Configurações do PDF."""
+    try:
+        tab = getattr(self, 'tab_files', None)
+        if tab is None:
+            return
+        targets = []
+        stack = [tab]
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(list(widget.winfo_children()))
+            except Exception:
+                pass
+            try:
+                txt = str(widget.cget('text') or '').lower()
+            except Exception:
+                txt = ''
+            try:
+                klass = widget.winfo_class()
+            except Exception:
+                klass = ''
+            if klass in ('TLabelframe', 'Labelframe') or isinstance(widget, ttk.LabelFrame):
+                if (
+                    'limpar: preparação' in txt
+                    or 'preparação visual' in txt
+                    or 'otimização de leitura' in txt
+                    or 'limpeza e otimização' in txt
+                ):
+                    targets.append(widget)
+        for widget in targets:
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11004_log('Remover painel grande da aba Limpar', exc)
+
+
+def _cuma_11004_replace_clean_preview_button(self) -> None:
+    """Substitui a prévia antiga da aba Limpar pela prévia real das opções de limpeza."""
+    try:
+        tab = getattr(self, 'tab_files', None)
+        if tab is None:
+            return
+        stack = [tab]
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(list(widget.winfo_children()))
+            except Exception:
+                pass
+            try:
+                txt = str(widget.cget('text') or '').strip()
+            except Exception:
+                txt = ''
+            try:
+                klass = widget.winfo_class()
+            except Exception:
+                klass = ''
+            if (klass == 'TButton' or isinstance(widget, ttk.Button)) and txt == 'Prévia':
+                try:
+                    widget.configure(text='Prévia Limpar', command=lambda: _cuma_11003_open_clean_preview(self), style='Accent.TButton')
+                except Exception:
+                    widget.configure(command=lambda: _cuma_11003_open_clean_preview(self))
+                return
+    except Exception as exc:
+        _cuma_11004_log('Trocar botão de prévia da aba Limpar', exc)
+
+
+def _cuma_11004_open_pdf_settings_window(self) -> None:
+    """Janela de Configurações do PDF com as opções KCC/E-ink que modificam páginas."""
+    try:
+        _cuma_11004_ensure_clean_vars(self)
+        top = tk.Toplevel(self.root)
+        top.title('Configurações do PDF')
+        try:
+            pal = getattr(self, '_theme_palette', {}) or {}
+            if pal.get('bg'):
+                top.configure(bg=pal.get('bg'))
+        except Exception:
+            pass
+
+        wrapper = ttk.Frame(top, style='Card.TFrame', padding=14)
+        wrapper.pack(fill='both', expand=True, padx=12, pady=12)
+        ttk.Label(wrapper, text='Configurações do PDF', style='TitleSmall.TLabel').grid(row=0, column=0, columnspan=4, sticky='w', pady=(0, 8))
+        ttk.Label(
+            wrapper,
+            text='A aba Limpar mantém o fluxo principal enxuto. Opções avançadas de preparação visual ficam aqui e são aplicadas somente ao processar/limpar o PDF.',
+            style='Muted.TLabel',
+            wraplength=820,
+            justify='left'
+        ).grid(row=1, column=0, columnspan=4, sticky='w', pady=(0, 12))
+
+        rows = [
+            ('Modo', ttk.Combobox(wrapper, textvariable=self.mode, values=MODES, state='readonly', width=28)),
+            ('Perfil', ttk.Combobox(wrapper, textvariable=self.profile, values=PROFILES, state='readonly', width=28)),
+            ('Compactação', ttk.Combobox(wrapper, textvariable=self.compression, values=COMPRESSION_OPTIONS, state='readonly', width=36)),
+            ('Senha PDF', ttk.Entry(wrapper, textvariable=self.password, show='*', width=38)),
+        ]
+        for offset, (label, widget) in enumerate(rows, start=2):
+            ttk.Label(wrapper, text=label, style='Muted.TLabel').grid(row=offset, column=0, sticky='w', pady=5, padx=(0, 12))
+            widget.grid(row=offset, column=1, sticky='w', pady=5)
+            try:
+                if isinstance(widget, ttk.Combobox):
+                    widget.bind('<<ComboboxSelected>>', lambda _e: self.save_current_config(force=True))
+                else:
+                    widget.bind('<FocusOut>', lambda _e: self.save_current_config(force=True))
+            except Exception:
+                pass
+
+        row = 6
+        ttk.Separator(wrapper, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky='ew', pady=(10, 12))
+        row += 1
+        ttk.Label(wrapper, text='Preparação visual de páginas', style='TitleSmall.TLabel').grid(row=row, column=0, columnspan=4, sticky='w', pady=(0, 6))
+        row += 1
+        ttk.Label(
+            wrapper,
+            text='Essas opções vêm da integração inspirada no KCC. Elas mudam o conteúdo do PDF limpo; o Converter apenas transforma formato.',
+            style='Muted.TLabel',
+            wraplength=820,
+            justify='left'
+        ).grid(row=row, column=0, columnspan=4, sticky='w', pady=(0, 8))
+        row += 1
+
+        def save_processing(*_):
+            _cuma_11004_save_clean_settings(self)
+
+        ttk.Label(wrapper, text='Ordem de leitura', style='Muted.TLabel').grid(row=row, column=0, sticky='w', pady=5)
+        cb_order = ttk.Combobox(wrapper, textvariable=self.cuma_reading_order, values=globals().get('CUMA_11000_READING_ORDERS', ('Ocidental', 'Mangá')), state='readonly', width=16)
+        cb_order.grid(row=row, column=1, sticky='w', pady=5)
+        ttk.Label(wrapper, text='Preset E-ink', style='Muted.TLabel').grid(row=row, column=2, sticky='w', padx=(18, 8), pady=5)
+        cb_preset = ttk.Combobox(wrapper, textvariable=self.cuma_image_preset, values=globals().get('CUMA_11000_IMAGE_PRESETS', ('Original',)), state='readonly', width=26)
+        cb_preset.grid(row=row, column=3, sticky='w', pady=5)
+        row += 1
+
+        ttk.Checkbutton(wrapper, text='Remover margens automaticamente', variable=self.cuma_auto_crop, command=save_processing).grid(row=row, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Label(wrapper, text='Força do corte', style='Muted.TLabel').grid(row=row, column=2, sticky='w', padx=(18, 8), pady=5)
+        cb_crop = ttk.Combobox(wrapper, textvariable=self.cuma_auto_crop_strength, values=('Suave', 'Normal', 'Forte'), state='readonly', width=12)
+        cb_crop.grid(row=row, column=3, sticky='w', pady=5)
+        row += 1
+
+        ttk.Checkbutton(wrapper, text='Remover rodapé/número de página', variable=self.cuma_remove_page_numbers, command=save_processing).grid(row=row, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(wrapper, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=save_processing).grid(row=row, column=2, columnspan=2, sticky='w', pady=4)
+        row += 1
+
+        ttk.Checkbutton(wrapper, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=save_processing).grid(row=row, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(wrapper, text='Webtoon/imagens longas', variable=self.cuma_webtoon_split, command=save_processing).grid(row=row, column=2, columnspan=2, sticky='w', pady=4)
+        row += 1
+
+        ttk.Button(wrapper, text='Prévia Limpar', command=lambda: _cuma_11003_open_clean_preview(self), style='Accent.TButton').grid(row=row, column=0, sticky='w', pady=(8, 10))
+        ttk.Label(
+            wrapper,
+            text='Dica: para páginas muito largas, ative “Dividir páginas duplas”. Em leitura Mangá, a metade direita sai antes da esquerda.',
+            style='Muted.TLabel',
+            wraplength=690,
+            justify='left'
+        ).grid(row=row, column=1, columnspan=3, sticky='w', pady=(8, 10))
+        row += 1
+
+        ttk.Separator(wrapper, orient='horizontal').grid(row=row, column=0, columnspan=4, sticky='ew', pady=(4, 12))
+        row += 1
+        for txt, var in (
+            ('Sobrescrever originais', self.overwrite_original),
+            ('Criar backup', self.create_backup),
+            ('Sempre manter primeira página', self.keep_first),
+            ('Salvar PDF com páginas removidas', self.save_removed_pdf),
+            ('Validar PDF final', self.validate_output),
+            ('Pular arquivos já processados', self.skip_existing),
+            ('Detectar duplicidades', self.detect_duplicates),
+            ('Processar automaticamente ao adicionar', self.auto_process_added),
+        ):
+            ttk.Checkbutton(wrapper, text=txt, variable=var, command=self.save_current_config).grid(row=row, column=0, columnspan=2, sticky='w', pady=3)
+            row += 1
+
+        ttk.Label(wrapper, text='Manter últimas páginas', style='Muted.TLabel').grid(row=row, column=0, sticky='w', pady=5)
+        ttk.Spinbox(wrapper, from_=0, to=20, textvariable=self.keep_last, width=8, command=self.save_current_config).grid(row=row, column=1, sticky='w', pady=5)
+        row += 1
+
+        for cb in (cb_order, cb_preset, cb_crop):
+            try:
+                cb.bind('<<ComboboxSelected>>', save_processing)
+            except Exception:
+                pass
+
+        buttons = ttk.Frame(wrapper, style='Card.TFrame')
+        buttons.grid(row=row, column=0, columnspan=4, sticky='ew', pady=(12, 0))
+        ttk.Button(buttons, text='Salvar configurações', command=lambda: self.save_current_config(force=True), style='Accent.TButton').pack(side='left')
+        ttk.Button(buttons, text='Fechar', command=top.destroy, style='Ghost.TButton').pack(side='left', padx=8)
+        wrapper.columnconfigure(1, weight=1)
+        wrapper.columnconfigure(3, weight=1)
+
+        try:
+            self.place_window_near_widget(top, getattr(self, 'pdf_settings_btn', None), width=920, height=800, min_width=840, min_height=640)
+        except Exception:
+            top.geometry('920x800')
+    except Exception as exc:
+        _cuma_11004_log('Abrir Configurações do PDF 1.100.4', exc)
+        try:
+            messagebox.showerror('Configurações do PDF', friendly_error(exc))
+        except Exception:
+            pass
+
+
+def _cuma_11004_find_converter_device_panel(self):
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return None
+        stack = [tab]
+        while stack:
+            widget = stack.pop(0)
+            try:
+                stack.extend(list(widget.winfo_children()))
+            except Exception:
+                pass
+            try:
+                txt = str(widget.cget('text') or '')
+            except Exception:
+                txt = ''
+            if (isinstance(widget, ttk.LabelFrame) or getattr(widget, 'winfo_class', lambda: '')() in ('TLabelframe', 'Labelframe')) and txt == 'Dispositivos e conversões':
+                return widget
+    except Exception as exc:
+        _cuma_11004_log('Localizar painel Dispositivos e conversões', exc)
+    return None
+
+
+def _cuma_11004_destroy_converter_floating_panels(self) -> None:
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        targets = []
+        for child in list(tab.winfo_children()):
+            try:
+                txt = str(child.cget('text') or '')
+            except Exception:
+                txt = ''
+            if isinstance(child, ttk.LabelFrame) and txt in ('Conversões disponíveis', 'Prévia, metadados e conversões', 'Conversões compatíveis'):
+                targets.append(child)
+            else:
+                # normalmente o LabelFrame está dentro do frame principal; remova também em descendentes de primeiro nível
+                try:
+                    for grand in list(child.winfo_children()):
+                        gtxt = str(grand.cget('text') or '') if isinstance(grand, ttk.LabelFrame) else ''
+                        if gtxt in ('Conversões disponíveis', 'Prévia, metadados e conversões', 'Conversões compatíveis'):
+                            targets.append(grand)
+                except Exception:
+                    pass
+        for widget in targets:
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11004_log('Remover painéis flutuantes do Converter', exc)
+
+
+def _cuma_11004_update_metadata_button(self) -> None:
+    try:
+        btn = getattr(self, '_cuma_11004_metadata_btn', None)
+        if btn is None:
+            return
+        path = _cuma_11001_active_converter_path(self) if '_cuma_11001_active_converter_path' in globals() else None
+        kind = _cuma_11001_kind_for_path(path) if path and '_cuma_11001_kind_for_path' in globals() else 'unknown'
+        to_epub = any(bool(_cuma_11001_var_for_key(self, key).get()) for key in ('pdf_epub', 'archive_epub', 'images_epub') if '_cuma_11001_var_for_key' in globals())
+        show = (kind == 'epub') or to_epub
+        if show:
+            try:
+                btn.grid()
+            except Exception:
+                pass
+        else:
+            try:
+                btn.grid_remove()
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11004_log('Atualizar visibilidade dos metadados EPUB', exc)
+
+
+_CUMA_11004_OLD_REFRESH = globals().get('_cuma_11001_refresh_conversion_options')
+
+
+def _cuma_11001_refresh_conversion_options(self) -> None:
+    try:
+        if _CUMA_11004_OLD_REFRESH is not None:
+            _CUMA_11004_OLD_REFRESH(self)
+    finally:
+        _cuma_11004_update_metadata_button(self)
+
+
+def _cuma_11004_add_converter_dynamic_panel(self) -> None:
+    """Integra as conversões compatíveis dentro de Dispositivos e conversões."""
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        if '_cuma_11001_setup_conversion_vars' in globals():
+            _cuma_11001_setup_conversion_vars(self)
+
+        _cuma_11004_destroy_converter_floating_panels(self)
+        top = _cuma_11004_find_converter_device_panel(self)
+        if top is None:
+            return
+
+        for child in list(top.winfo_children()):
+            try:
+                if child.winfo_name() == 'cuma11004_conversions':
+                    child.destroy()
+            except Exception:
+                pass
+
+        panel = ttk.Frame(top, style='Card.TFrame', name='cuma11004_conversions')
+        panel.grid(row=3, column=0, columnspan=6, sticky='ew', pady=(10, 0))
+        try:
+            ttk.Separator(panel, orient='horizontal').grid(row=0, column=0, columnspan=6, sticky='ew', pady=(0, 8))
+        except Exception:
+            pass
+
+        self.cuma_conversion_hint = tk.StringVar(value='Adicione ou selecione um arquivo para liberar as conversões compatíveis.')
+        ttk.Label(panel, text='Conversões compatíveis', style='Strong.TLabel').grid(row=1, column=0, sticky='w', padx=(0, 12), pady=(0, 4))
+        ttk.Label(panel, textvariable=self.cuma_conversion_hint, style='Muted.TLabel', wraplength=850, justify='left').grid(row=1, column=1, columnspan=5, sticky='w', pady=(0, 4))
+
+        grid = ttk.Frame(panel, style='Card.TFrame')
+        grid.grid(row=2, column=0, columnspan=6, sticky='ew')
+        self._cuma_11001_conversion_widgets = {}
+
+        def changed():
+            try:
+                _cuma_11001_refresh_conversion_options(self)
+            except Exception:
+                pass
+            try:
+                self.save_current_config(force=True)
+            except Exception:
+                pass
+
+        ordered = (
+            'pdf_epub', 'pdf_xtch', 'pdf_cbz', 'pdf_images',
+            'epub_xtch', 'epub_pdf',
+            'archive_epub', 'archive_xtch', 'archive_pdf',
+            'images_pdf', 'images_epub', 'images_xtch'
+        )
+        for idx, key in enumerate(ordered):
+            var = _cuma_11001_var_for_key(self, key)
+            cb = ttk.Checkbutton(grid, text=CUMA_11001_CONVERSION_LABELS[key], variable=var, command=changed)
+            cb.grid(row=idx // 5, column=idx % 5, sticky='w', padx=(0, 18), pady=4)
+            self._cuma_11001_conversion_widgets[key] = cb
+
+        meta = ttk.Button(grid, text='Metadados EPUB', command=lambda: _cuma_11000_open_metadata_editor(self), style='Ghost.TButton')
+        meta.grid(row=0, column=4, sticky='w', padx=(0, 18), pady=4)
+        self._cuma_11004_metadata_btn = meta
+
+        for key in ('pdf_epub', 'archive_epub', 'images_epub'):
+            try:
+                _cuma_11001_var_for_key(self, key).trace_add('write', lambda *_: _cuma_11004_update_metadata_button(self))
+            except Exception:
+                pass
+
+        try:
+            self.xteink_tree.bind('<<TreeviewSelect>>', lambda _e: _cuma_11001_refresh_conversion_options(self), add='+')
+        except Exception:
+            pass
+        try:
+            self.xteink_input.trace_add('write', lambda *_: _cuma_11001_refresh_conversion_options(self))
+        except Exception:
+            pass
+
+        panel.columnconfigure(1, weight=1)
+        top.columnconfigure(1, weight=1)
+        _cuma_11001_refresh_conversion_options(self)
+    except Exception as exc:
+        _cuma_11004_log('Adicionar conversões integradas ao Converter', exc)
+
+
+def _cuma_11004_compact_converter_layout(self) -> None:
+    try:
+        tab = getattr(self, 'tab_xteink', None)
+        if tab is None:
+            return
+        if hasattr(self, 'xteink_drop'):
+            try:
+                self.xteink_drop.configure(padding=10, text='Arraste PDF, EPUB, CBZ/ZIP, CBR/RAR/7Z, imagens ou pastas aqui')
+                self.xteink_drop.pack_configure(pady=(4, 6))
+            except Exception:
+                pass
+        # Diminui espaços excessivos entre área de arraste, botões e tabela.
+        for child in list(tab.winfo_children()):
+            try:
+                for w in child.winfo_children():
+                    # frame dos botões contém o botão "Adicionar arquivo(s)".
+                    names = []
+                    try:
+                        names = [str(c.cget('text') or '') for c in w.winfo_children()]
+                    except Exception:
+                        names = []
+                    if 'Adicionar arquivo(s)' in names and 'Prévia' in names:
+                        w.pack_configure(pady=(4, 6))
+                    if hasattr(self, 'xteink_tree') and _cuma_11001_contains_treeview(w):
+                        w.pack_configure(pady=(2, 0))
+            except Exception:
+                pass
+        try:
+            self.xteink_prog_total.pack_configure(pady=(0, 3))
+            self.xteink_prog_current.pack_configure(pady=(0, 0))
+        except Exception:
+            pass
+    except Exception as exc:
+        _cuma_11004_log('Compactar layout do Converter', exc)
+
+
+def _cuma_11004_apply_tree_hover_style(self) -> None:
+    """Evita texto branco em fundo claro no hover/active de cabeçalhos/linhas."""
+    try:
+        p = getattr(self, '_theme_palette', None) or PALETTES.get(self.theme.get(), PALETTES.get('Manga Dark', {}))
+        fg = p.get('fg', '#F4F7FB')
+        surface2 = p.get('surface2', '#263040')
+        drop = p.get('drop', '#111821')
+        selection = p.get('selection', '#31465A')
+        s = getattr(self, 'style', None)
+        if s is None:
+            return
+        s.configure('Treeview.Heading', background=surface2, foreground=fg, bordercolor=p.get('border', '#3A4658'))
+        s.map('Treeview.Heading',
+              background=[('active', selection), ('pressed', selection)],
+              foreground=[('active', fg), ('pressed', fg)])
+        s.map('Treeview',
+              background=[('selected', selection), ('active', drop)],
+              foreground=[('selected', fg), ('active', fg)])
+        for tree_name in ('tree', 'xteink_tree'):
+            tree = getattr(self, tree_name, None)
+            if tree is not None:
+                try:
+                    tree.tag_configure('hover', foreground=fg, background=drop)
+                except Exception:
+                    pass
+    except Exception as exc:
+        _cuma_11004_log('Aplicar estilo hover da tabela', exc)
+
+
+def _cuma_11004_reorganize_ui(self) -> None:
+    try:
+        if '_cuma_11001_destroy_legacy_converter_optimization_panel' in globals():
+            _cuma_11001_destroy_legacy_converter_optimization_panel(self)
+    except Exception:
+        pass
+    try:
+        if '_cuma_11001_remove_legacy_converter_checkbuttons' in globals():
+            _cuma_11001_remove_legacy_converter_checkbuttons(self)
+    except Exception:
+        pass
+
+    _cuma_11004_ensure_clean_vars(self)
+    _cuma_11004_remove_clean_optimization_panel(self)
+    _cuma_11004_replace_clean_preview_button(self)
+    _cuma_11004_add_converter_dynamic_panel(self)
+    _cuma_11004_compact_converter_layout(self)
+    _cuma_11004_apply_tree_hover_style(self)
+
+    try:
+        if '_cuma_11001_remove_legacy_converter_checkbuttons' in globals():
+            _cuma_11001_remove_legacy_converter_checkbuttons(self)
+    except Exception:
+        pass
+
+
+_CUMA_11004_RUNTIME = {
+    'build': getattr(App, 'build', None),
+    'apply_theme': getattr(App, 'apply_theme', None),
+    'save_current_config': getattr(App, 'save_current_config', None),
+}
+
+
+def _cuma_11004_build(self):
+    result = _CUMA_11004_RUNTIME['build'](self)
+    try:
+        _cuma_11004_reorganize_ui(self)
+    except Exception as exc:
+        _cuma_11004_log('Reorganização UI', exc)
+    return result
+
+
+def _cuma_11004_apply_theme(self):
+    result = _CUMA_11004_RUNTIME['apply_theme'](self)
+    try:
+        _cuma_11004_apply_tree_hover_style(self)
+    except Exception:
+        pass
+    return result
+
+
+def _cuma_11004_save_current_config(self, force: bool = False):
+    result = _CUMA_11004_RUNTIME['save_current_config'](self, force)
+    try:
+        if '_cuma_11000_set_processing_from_app' in globals():
+            _cuma_11000_set_processing_from_app(self)
+    except Exception as exc:
+        _cuma_11004_log('Salvar configurações 1.100.4', exc)
+    return result
+
+
+def _cuma_11004_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11004_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11004_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11004_VERSION,
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'notes': 'Acabamento visual do Converter, metadados EPUB contextuais, opções KCC/E-ink dentro de Configurações do PDF e prévia Limpar unificada.'
+        }
+        if 'cuma_version_apply_globals' in globals():
+            cuma_version_apply_globals(CUMA_11004_VERSION)
+    except Exception:
+        pass
+    try:
+        state = cuma_version_load_state()
+        events = state.get('events', [])
+        if not isinstance(events, list):
+            events = []
+        if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11004_UPDATE_ID for e in events):
+            events.append({
+                'update_id': CUMA_11004_UPDATE_ID,
+                'version': CUMA_11004_VERSION,
+                'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                'scale': 'pouca',
+                'description': 'Integra conversões compatíveis ao painel de dispositivos, torna Metadados EPUB contextual, move opções KCC/E-ink para Configurações do PDF e corrige hover da tabela.',
+                'timestamp': datetime.now().isoformat(timespec='seconds')
+            })
+        state['events'] = events[-100:]
+        state['current_version'] = CUMA_11004_VERSION
+        state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+        cuma_version_save_state(state)
+        if '_cuma_version_write_public_files' in globals():
+            _cuma_version_write_public_files(state)
+    except Exception as exc:
+        _cuma_11004_log('Versionamento 1.100.4', exc)
+
+
+def _cuma_install_11004_ui_finish() -> None:
+    try:
+        _cuma_11004_force_version()
+        App.build = _cuma_11004_build
+        App.apply_theme = _cuma_11004_apply_theme
+        App.save_current_config = _cuma_11004_save_current_config
+        App.open_pdf_settings_window = _cuma_11004_open_pdf_settings_window
+        globals()['_cuma_11001_add_clean_optimization_panel'] = lambda self: None
+        globals()['_cuma_11003_add_clean_optimization_panel'] = lambda self: None
+        globals()['_cuma_11001_add_converter_dynamic_panel'] = _cuma_11004_add_converter_dynamic_panel
+        globals()['_cuma_11003_add_converter_dynamic_panel'] = _cuma_11004_add_converter_dynamic_panel
+        globals()['_cuma_11003_reorganize_ui'] = _cuma_11004_reorganize_ui
+    except Exception as exc:
+        _cuma_11004_log('Instalação patch 1.100.4', exc)
+
+
+_cuma_install_11004_ui_finish()
+
+
+# =============================================================================
+# CUMA 1.100.5 - ORDEM MANUAL DE ARQUIVOS E LAYOUT COMPACTO
+# =============================================================================
+# Ajustes:
+# - Botões "Mover pra cima ↑" e "Mover pra baixo ↓" nas filas de Limpar,
+#   Ferramentas e Converter.
+# - Reordenação por clicar, segurar e arrastar uma linha da lista.
+# - Remoção do espaço vazio entre os botões e a lista do Converter.
+CUMA_11005_VERSION = '1.100.5'
+CUMA_11005_UPDATE_ID = 'ordem_manual_filas_e_converter_compacto_11005'
+
+
+def _cuma_11005_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        msg = f'{context}: {exc}' if exc is not None else str(context)
+        write_log(msg)
+    except Exception:
+        pass
+
+
+def _cuma_11005_widget_text(widget) -> str:
+    try:
+        return str(widget.cget('text') or '')
+    except Exception:
+        return ''
+
+
+def _cuma_11005_walk(widget):
+    yield widget
+    try:
+        children = list(widget.winfo_children())
+    except Exception:
+        children = []
+    for child in children:
+        yield from _cuma_11005_walk(child)
+
+
+def _cuma_11005_contains(root, target) -> bool:
+    try:
+        if root == target:
+            return True
+        for child in root.winfo_children():
+            if _cuma_11005_contains(child, target):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _cuma_11005_ancestor_chain(widget) -> list:
+    chain = []
+    cur = widget
+    while cur is not None:
+        chain.append(cur)
+        try:
+            cur = cur.master
+        except Exception:
+            break
+    return chain
+
+
+def _cuma_11005_common_score(a, b) -> int:
+    achain = _cuma_11005_ancestor_chain(a)
+    bchain = _cuma_11005_ancestor_chain(b)
+    best = 10_000
+    for ai, aw in enumerate(achain):
+        for bi, bw in enumerate(bchain):
+            if aw == bw:
+                best = min(best, ai + bi)
+    return best
+
+
+def _cuma_11005_is_file_toolbar(widget) -> bool:
+    try:
+        texts = [_cuma_11005_widget_text(child).strip() for child in widget.winfo_children()]
+    except Exception:
+        return False
+    if not texts:
+        return False
+    has_add = any(t.startswith('Adicionar') or t == 'Colar caminho' for t in texts)
+    has_list_action = any(t in ('Remover', 'Limpar', 'Limpar lista') for t in texts)
+    has_preview_or_folder = any(t in ('Prévia', 'Abrir pasta Ferramentas', 'Abrir pasta Converter', 'Funções por tipo') for t in texts)
+    return has_add and has_list_action and has_preview_or_folder
+
+
+def _cuma_11005_find_toolbar(root, tree):
+    try:
+        candidates = []
+        for widget in _cuma_11005_walk(root):
+            if _cuma_11005_is_file_toolbar(widget):
+                candidates.append(widget)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda w: _cuma_11005_common_score(w, tree))
+        return candidates[0]
+    except Exception as exc:
+        _cuma_11005_log('Localizar barra de botões para reordenação', exc)
+        return None
+
+
+def _cuma_11005_item_file_map(tree, files: list) -> dict:
+    try:
+        items = list(tree.get_children(''))
+    except Exception:
+        items = []
+    return {item: files[idx] for idx, item in enumerate(items) if idx < len(files)}
+
+
+def _cuma_11005_path_key(value) -> str:
+    try:
+        return _cuma_11008_path_key(value)
+    except Exception:
+        return str(value)
+
+
+def _cuma_11005_apply_tree_order_to_model(self, tree, files_attr: str, item_file: dict | None = None) -> None:
+    try:
+        old_files = list(getattr(self, files_attr, []))
+        if item_file is None:
+            item_file = _cuma_11005_item_file_map(tree, old_files)
+        new_files = []
+        used = set()
+        for item in list(tree.get_children('')):
+            if item in item_file:
+                value = item_file[item]
+                new_files.append(value)
+                used.add(_cuma_11005_path_key(value))
+        for value in old_files:
+            key = _cuma_11005_path_key(value)
+            if key not in used:
+                new_files.append(value)
+        setattr(self, files_attr, new_files)
+    except Exception as exc:
+        _cuma_11005_log(f'Sincronizar ordem da lista {files_attr}', exc)
+
+
+def _cuma_11005_update_after_reorder(self, files_attr: str, tree=None) -> None:
+    try:
+        if files_attr == 'files' and hasattr(self, 'update_counter'):
+            self.update_counter()
+        elif files_attr == 'xteink_files':
+            if tree is not None and hasattr(self, 'xteink_input'):
+                selected = list(tree.selection())
+                children = list(tree.get_children(''))
+                files = list(getattr(self, 'xteink_files', []))
+                if selected and selected[0] in children:
+                    idx = children.index(selected[0])
+                    if 0 <= idx < len(files):
+                        try:
+                            self.xteink_input.set(str(files[idx]))
+                        except Exception:
+                            pass
+            if hasattr(self, 'update_xteink_counter'):
+                self.update_xteink_counter()
+            if '_cuma_11001_refresh_conversion_options' in globals():
+                try:
+                    _cuma_11001_refresh_conversion_options(self)
+                except Exception:
+                    pass
+        elif files_attr == 'tools_extract_files':
+            if hasattr(self, 'tools_extract_counter'):
+                self.tools_extract_counter.set(f'Arquivos: {len(getattr(self, files_attr, []))}')
+        elif files_attr == 'tools_create_files':
+            if hasattr(self, 'tools_create_counter'):
+                self.tools_create_counter.set(f'Arquivos: {len(getattr(self, files_attr, []))}')
+        if hasattr(self, 'refresh_dashboard'):
+            try:
+                self.refresh_dashboard()
+            except Exception:
+                pass
+    except Exception as exc:
+        _cuma_11005_log(f'Atualizar contadores após reordenar {files_attr}', exc)
+
+
+def _cuma_11005_move_selection(self, tree, files_attr: str, direction: int) -> None:
+    try:
+        children = list(tree.get_children(''))
+        selected = [item for item in tree.selection() if item in children]
+        if not selected:
+            try:
+                messagebox.showinfo('Mover arquivos', 'Selecione um arquivo na lista para mover.')
+            except Exception:
+                pass
+            return
+
+        item_file = _cuma_11005_item_file_map(tree, list(getattr(self, files_attr, [])))
+        selected_set = set(selected)
+        ordered = sorted(selected, key=lambda item: children.index(item))
+        if direction < 0:
+            for item in ordered:
+                current = list(tree.get_children(''))
+                idx = current.index(item)
+                if idx > 0 and current[idx - 1] not in selected_set:
+                    tree.move(item, '', idx - 1)
+        else:
+            for item in reversed(ordered):
+                current = list(tree.get_children(''))
+                idx = current.index(item)
+                if idx < len(current) - 1 and current[idx + 1] not in selected_set:
+                    tree.move(item, '', idx + 1)
+
+        _cuma_11005_apply_tree_order_to_model(self, tree, files_attr, item_file)
+        try:
+            tree.selection_set(selected)
+            tree.focus(selected[0])
+            tree.see(selected[0])
+        except Exception:
+            pass
+        _cuma_11005_update_after_reorder(self, files_attr, tree)
+    except Exception as exc:
+        _cuma_11005_log(f'Mover seleção em {files_attr}', exc)
+
+
+def _cuma_11005_bind_drag_reorder(self, tree, files_attr: str) -> None:
+    try:
+        if getattr(tree, '_cuma11005_drag_reorder_bound', False):
+            return
+        state = {'item': None, 'item_file': None}
+
+        def on_press(event):
+            try:
+                region = tree.identify_region(event.x, event.y)
+                if region in ('heading', 'separator'):
+                    state['item'] = None
+                    state['item_file'] = None
+                    return
+                item = tree.identify_row(event.y)
+                if not item:
+                    state['item'] = None
+                    state['item_file'] = None
+                    return
+                state['item'] = item
+                state['item_file'] = _cuma_11005_item_file_map(tree, list(getattr(self, files_attr, [])))
+                if item not in tree.selection():
+                    tree.selection_set(item)
+                tree.focus(item)
+            except Exception as exc:
+                _cuma_11005_log(f'Iniciar arraste em {files_attr}', exc)
+
+        def on_motion(event):
+            try:
+                item = state.get('item')
+                if not item or not tree.exists(item):
+                    return
+                target = tree.identify_row(event.y)
+                if not target or target == item or not tree.exists(target):
+                    return
+                children = list(tree.get_children(''))
+                if item not in children or target not in children:
+                    return
+                old_idx = children.index(item)
+                new_idx = children.index(target)
+                if old_idx == new_idx:
+                    return
+                tree.move(item, '', new_idx)
+                _cuma_11005_apply_tree_order_to_model(self, tree, files_attr, state.get('item_file'))
+                try:
+                    tree.selection_set(item)
+                    tree.focus(item)
+                    tree.see(item)
+                except Exception:
+                    pass
+                _cuma_11005_update_after_reorder(self, files_attr, tree)
+                return 'break'
+            except Exception as exc:
+                _cuma_11005_log(f'Arrastar item em {files_attr}', exc)
+
+        def on_release(_event):
+            state['item'] = None
+            state['item_file'] = None
+
+        tree.bind('<ButtonPress-1>', on_press, add='+')
+        tree.bind('<B1-Motion>', on_motion, add='+')
+        tree.bind('<ButtonRelease-1>', on_release, add='+')
+        tree._cuma11005_drag_reorder_bound = True
+    except Exception as exc:
+        _cuma_11005_log(f'Vincular arraste em {files_attr}', exc)
+
+
+def _cuma_11005_add_move_buttons(self, toolbar, tree, files_attr: str) -> None:
+    try:
+        if toolbar is None or getattr(toolbar, '_cuma11005_move_buttons_added', False):
+            return
+        existing = {_cuma_11005_widget_text(child).strip() for child in toolbar.winfo_children()}
+        if 'Mover pra cima ↑' not in existing:
+            ttk.Button(
+                toolbar,
+                text='Mover pra cima ↑',
+                command=lambda t=tree, attr=files_attr: _cuma_11005_move_selection(self, t, attr, -1),
+                style='Ghost.TButton'
+            ).pack(side='left', padx=(10, 4))
+        if 'Mover pra baixo ↓' not in existing:
+            ttk.Button(
+                toolbar,
+                text='Mover pra baixo ↓',
+                command=lambda t=tree, attr=files_attr: _cuma_11005_move_selection(self, t, attr, 1),
+                style='Ghost.TButton'
+            ).pack(side='left', padx=4)
+        toolbar._cuma11005_move_buttons_added = True
+    except Exception as exc:
+        _cuma_11005_log(f'Adicionar botões de mover para {files_attr}', exc)
+
+
+def _cuma_11005_container_is_empty(widget) -> bool:
+    try:
+        children = list(widget.winfo_children())
+        if not children:
+            return True
+        # Frames que ficaram somente com checkbuttons removidos/ocultos não precisam ocupar espaço.
+        visible = []
+        for child in children:
+            try:
+                if child.winfo_ismapped():
+                    visible.append(child)
+            except Exception:
+                pass
+        return len(visible) == 0
+    except Exception:
+        return False
+
+
+def _cuma_11005_compact_converter_gap(self) -> None:
+    try:
+        tree = getattr(self, 'xteink_tree', None)
+        tab = getattr(self, 'tab_xteink', None)
+        if tree is None or tab is None:
+            return
+        toolbar = _cuma_11005_find_toolbar(tab, tree)
+        tree_frame = getattr(tree, 'master', None)
+        if toolbar is None or tree_frame is None:
+            return
+
+        parent = getattr(tree_frame, 'master', None)
+        if parent is not None:
+            # Remove frames vazios que ficavam entre a barra de botões e a tabela.
+            try:
+                children = list(parent.winfo_children())
+                if toolbar in children and tree_frame in children:
+                    i_toolbar = children.index(toolbar)
+                    i_tree = children.index(tree_frame)
+                    if i_toolbar < i_tree:
+                        for child in children[i_toolbar + 1:i_tree]:
+                            if child is not tree_frame and _cuma_11005_container_is_empty(child):
+                                try:
+                                    child.pack_forget()
+                                except Exception:
+                                    pass
+                    tree_frame.pack_configure(after=toolbar, pady=(0, 4))
+            except Exception:
+                pass
+
+            for child in list(parent.winfo_children()):
+                try:
+                    if child == getattr(self, 'xteink_drop', None):
+                        child.pack_configure(pady=(0, 4))
+                    elif child == toolbar:
+                        child.pack_configure(pady=(0, 4))
+                    elif child == tree_frame:
+                        child.pack_configure(pady=(0, 4))
+                except Exception:
+                    pass
+
+        try:
+            if hasattr(self, 'xteink_drop'):
+                self.xteink_drop.configure(padding=8)
+        except Exception:
+            pass
+    except Exception as exc:
+        _cuma_11005_log('Compactar espaço entre botões e lista do Converter', exc)
+
+
+def _cuma_11005_install_reorder_controls(self) -> None:
+    try:
+        specs = [
+            (getattr(self, 'tab_files', None), getattr(self, 'tree', None), 'files'),
+            (getattr(self, 'tab_xteink', None), getattr(self, 'xteink_tree', None), 'xteink_files'),
+            (getattr(self, 'tab_tools', None), getattr(self, 'tools_extract_tree', None), 'tools_extract_files'),
+            (getattr(self, 'tab_tools', None), getattr(self, 'tools_create_tree', None), 'tools_create_files'),
+        ]
+        for root, tree, files_attr in specs:
+            if root is None or tree is None or not hasattr(self, files_attr):
+                continue
+            _cuma_11005_bind_drag_reorder(self, tree, files_attr)
+            toolbar = _cuma_11005_find_toolbar(root, tree)
+            _cuma_11005_add_move_buttons(self, toolbar, tree, files_attr)
+        _cuma_11005_compact_converter_gap(self)
+    except Exception as exc:
+        _cuma_11005_log('Instalar controles de ordem manual', exc)
+
+
+_CUMA_11005_RUNTIME = {
+    'build': getattr(App, 'build', None),
+    'apply_theme': getattr(App, 'apply_theme', None),
+}
+
+
+def _cuma_11005_build(self):
+    result = _CUMA_11005_RUNTIME['build'](self)
+    try:
+        _cuma_11005_install_reorder_controls(self)
+    except Exception as exc:
+        _cuma_11005_log('Build 1.100.5', exc)
+    return result
+
+
+def _cuma_11005_apply_theme(self):
+    result = _CUMA_11005_RUNTIME['apply_theme'](self)
+    try:
+        # Garante que os botões de mover continuem presentes após reconstruções visuais.
+        _cuma_11005_install_reorder_controls(self)
+    except Exception:
+        pass
+    return result
+
+
+def _cuma_11005_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11005_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11005_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11005_VERSION,
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'notes': 'Adiciona reordenação manual nas filas e compacta o espaço do Converter.'
+        }
+        if 'cuma_version_apply_globals' in globals():
+            cuma_version_apply_globals(CUMA_11005_VERSION)
+    except Exception:
+        pass
+    try:
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            state = cuma_version_load_state()
+            events = state.get('events', []) if isinstance(state, dict) else []
+            if not isinstance(events, list):
+                events = []
+            if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11005_UPDATE_ID for e in events):
+                events.append({
+                    'update_id': CUMA_11005_UPDATE_ID,
+                    'version': CUMA_11005_VERSION,
+                    'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                    'scale': 'pouca',
+                    'description': 'Botões Mover pra cima/baixo e arraste para reordenar nas filas de Limpar, Ferramentas e Converter; layout do Converter mais compacto.',
+                    'timestamp': datetime.now().isoformat(timespec='seconds')
+                })
+            state['events'] = events[-100:]
+            state['current_version'] = CUMA_11005_VERSION
+            state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+            cuma_version_save_state(state)
+            if '_cuma_version_write_public_files' in globals():
+                _cuma_version_write_public_files(state)
+    except Exception as exc:
+        _cuma_11005_log('Versionamento 1.100.5', exc)
+
+
+def _cuma_install_11005_reorder_and_compact_layout() -> None:
+    try:
+        _cuma_11005_force_version()
+        App.build = _cuma_11005_build
+        App.apply_theme = _cuma_11005_apply_theme
+    except Exception as exc:
+        _cuma_11005_log('Instalação patch 1.100.5', exc)
+
+
+_cuma_install_11005_reorder_and_compact_layout()
+
+
+# =============================================================================
+# CUMA 1.100.6 - CRIAR PDF ACEITA IMAGENS, PDF, CBZ E ARQUIVOS COM IMAGENS
+# =============================================================================
+# Ajustes:
+# - A ferramenta "Criar PDF de imagens" também aceita PDFs.
+# - Também aceita CBZ/ZIP/EPUB com imagens nativamente.
+# - Aceita CBR/RAR/7Z quando o 7-Zip estiver instalado e disponível no PATH.
+# - A ordem da lista continua sendo respeitada, inclusive com os controles de mover.
+CUMA_11006_VERSION = '1.100.6'
+CUMA_11006_UPDATE_ID = 'ferramentas_criar_pdf_multiformato_11006'
+CUMA_11006_ARCHIVE_EXTS = ('.cbz', '.zip', '.epub', '.cbr', '.rar', '.7z')
+CUMA_11006_CREATE_PDF_EXTS = tuple(dict.fromkeys(tuple(SUPPORTED_IMAGE_EXT) + ('.pdf',) + CUMA_11006_ARCHIVE_EXTS))
+
+
+def _cuma_11006_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        msg = f'{context}: {type(exc).__name__}: {exc}' if exc is not None else str(context)
+        write_log(msg)
+    except Exception:
+        pass
+
+
+def _cuma_11006_accept_create_path(path: Path) -> bool:
+    try:
+        return Path(path).suffix.lower() in CUMA_11006_CREATE_PDF_EXTS
+    except Exception:
+        return False
+
+
+_CUMA_11006_ORIG_TOOLS_ACCEPT_PATH = globals().get('_tools_accept_path')
+def _tools_accept_path(path: Path, kind: str) -> bool:
+    try:
+        suffix = Path(path).suffix.lower()
+        if kind == 'extract':
+            return suffix == '.pdf'
+        if kind == 'create':
+            return suffix in CUMA_11006_CREATE_PDF_EXTS
+        if _CUMA_11006_ORIG_TOOLS_ACCEPT_PATH:
+            return _CUMA_11006_ORIG_TOOLS_ACCEPT_PATH(path, kind)
+    except Exception:
+        return False
+    return False
+
+
+def _cuma_11006_create_filetypes():
+    return [
+        ('Imagens, PDF e quadrinhos', '*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.pdf *.cbz *.zip *.epub *.cbr *.rar *.7z'),
+        ('Imagens', '*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff'),
+        ('PDF', '*.pdf'),
+        ('CBZ/ZIP/EPUB', '*.cbz *.zip *.epub'),
+        ('CBR/RAR/7Z', '*.cbr *.rar *.7z'),
+        ('Todos', '*.*'),
+    ]
+
+
+def _tools_add_files(self, kind: str) -> None:
+    if kind == 'extract':
+        files = filedialog.askopenfilenames(title='Adicionar PDFs', filetypes=[('PDF', '*.pdf'), ('Todos', '*.*')])
+    else:
+        files = filedialog.askopenfilenames(title='Adicionar imagens, PDFs ou arquivos com imagens', filetypes=_cuma_11006_create_filetypes())
+    _tools_tree_insert(self, kind, files)
+
+
+def _cuma_11006_natural_key(value) -> list:
+    try:
+        if '_natural_key' in globals():
+            return _natural_key(str(value))
+    except Exception:
+        pass
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', str(value))]
+
+
+def _cuma_11006_image_names_from_zip(zf: zipfile.ZipFile) -> list[str]:
+    names = []
+    for name in zf.namelist():
+        try:
+            if name.endswith('/'):
+                continue
+            if Path(name).suffix.lower() in SUPPORTED_IMAGE_EXT:
+                names.append(name)
+        except Exception:
+            pass
+    return sorted(names, key=_cuma_11006_natural_key)
+
+
+def _cuma_11006_rgb_copy(img: Image.Image) -> Image.Image:
+    try:
+        if img.mode in ('RGBA', 'LA') or 'transparency' in getattr(img, 'info', {}):
+            rgba = img.convert('RGBA')
+            bg = Image.new('RGB', rgba.size, 'white')
+            bg.paste(rgba, mask=rgba.getchannel('A'))
+            try:
+                rgba.close()
+            except Exception:
+                pass
+            return bg
+        return img.convert('RGB')
+    except Exception:
+        return img.copy().convert('RGB')
+
+
+def _cuma_11006_iter_opened_image(opened: Image.Image):
+    frames = int(getattr(opened, 'n_frames', 1) or 1)
+    for idx in range(max(1, frames)):
+        try:
+            if frames > 1:
+                opened.seek(idx)
+            yield _cuma_11006_rgb_copy(opened)
+        except EOFError:
+            break
+
+
+def _cuma_11006_iter_image_file(path: Path):
+    with Image.open(path) as opened:
+        for img in _cuma_11006_iter_opened_image(opened):
+            yield img
+
+
+def _cuma_11006_extract_archive_with_7z(archive_path: Path, tmp_dir: Path) -> list[Path]:
+    if '_cuma_11000_extract_with_7z' in globals():
+        return _cuma_11000_extract_with_7z(archive_path, tmp_dir)
+    exe = shutil.which('7z') or shutil.which('7za') or shutil.which('7zr')
+    if not exe:
+        raise RuntimeError('Arquivos CBR/RAR/7Z precisam do 7-Zip instalado e disponível no PATH. CBZ/ZIP/EPUB funciona nativamente.')
+    cmd = [exe, 'x', '-y', f'-o{str(tmp_dir)}', str(archive_path)]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or 'Falha ao extrair arquivo compactado com 7-Zip.').strip())
+    files = [p for p in tmp_dir.rglob('*') if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_EXT]
+    return sorted(files, key=lambda p: _cuma_11006_natural_key(p.as_posix()))
+
+
+def _cuma_11006_iter_archive_images(path: Path):
+    suffix = Path(path).suffix.lower()
+    if suffix in ('.cbz', '.zip', '.epub'):
+        with zipfile.ZipFile(path, 'r') as zf:
+            names = _cuma_11006_image_names_from_zip(zf)
+            if not names:
+                raise RuntimeError(f'Não encontrei imagens dentro de {path.name}.')
+            for name in names:
+                try:
+                    with zf.open(name) as f:
+                        data = BytesIO(f.read())
+                    with Image.open(data) as opened:
+                        for img in _cuma_11006_iter_opened_image(opened):
+                            yield img
+                except Exception as exc:
+                    _cuma_11006_log(f'Imagem ignorada em {path.name}: {name}', exc)
+    elif suffix in ('.cbr', '.rar', '.7z'):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='cuma_criar_pdf_') as td:
+            files = _cuma_11006_extract_archive_with_7z(path, Path(td))
+            if not files:
+                raise RuntimeError(f'Não encontrei imagens dentro de {path.name}.')
+            for img_path in files:
+                try:
+                    for img in _cuma_11006_iter_image_file(img_path):
+                        yield img
+                except Exception as exc:
+                    _cuma_11006_log(f'Imagem ignorada em {path.name}: {img_path.name}', exc)
+    else:
+        raise RuntimeError(f'Arquivo compactado não suportado: {path.name}')
+
+
+def _cuma_11006_iter_source_images(path: Path):
+    suffix = Path(path).suffix.lower()
+    if suffix in SUPPORTED_IMAGE_EXT:
+        yield from _cuma_11006_iter_image_file(path)
+    elif suffix in CUMA_11006_ARCHIVE_EXTS:
+        yield from _cuma_11006_iter_archive_images(path)
+    else:
+        raise RuntimeError(f'Formato não suportado para criar PDF: {path.name}')
+
+
+def _cuma_11006_add_image_page(out_doc, img: Image.Image) -> None:
+    rgb = _cuma_11006_rgb_copy(img)
+    try:
+        width = max(1, int(rgb.width))
+        height = max(1, int(rgb.height))
+        page = out_doc.new_page(width=float(width), height=float(height))
+        rect = fitz.Rect(0, 0, float(width), float(height))
+        bio = BytesIO()
+        rgb.save(bio, format='JPEG', quality=95, optimize=True)
+        page.insert_image(rect, stream=bio.getvalue())
+    finally:
+        try:
+            if rgb is not img:
+                rgb.close()
+        except Exception:
+            pass
+
+
+def _cuma_11006_append_pdf_source(out_doc, pdf_path: Path, progress_cb=None) -> int:
+    src_doc = fitz.open(str(pdf_path))
+    try:
+        page_count = len(src_doc)
+        if page_count <= 0:
+            raise RuntimeError(f'PDF sem páginas: {pdf_path.name}')
+        for page_index in range(page_count):
+            out_doc.insert_pdf(src_doc, from_page=page_index, to_page=page_index)
+            if progress_cb:
+                progress_cb(page_index + 1, page_count)
+        return page_count
+    finally:
+        src_doc.close()
+
+
+def _cuma_11006_append_image_source(out_doc, source_path: Path, progress_cb=None) -> int:
+    count = 0
+    for img in _cuma_11006_iter_source_images(source_path):
+        try:
+            _cuma_11006_add_image_page(out_doc, img)
+            count += 1
+            if progress_cb:
+                progress_cb(count, max(1, count))
+        finally:
+            try:
+                img.close()
+            except Exception:
+                pass
+    if count <= 0:
+        raise RuntimeError(f'Nenhuma imagem válida em {source_path.name}.')
+    return count
+
+
+def _cuma_11006_first_preview_image(path: Path):
+    suffix = Path(path).suffix.lower()
+    if suffix == '.pdf':
+        doc = fitz.open(str(path))
+        try:
+            if len(doc) <= 0:
+                return None
+            page = doc[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+            return Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+        finally:
+            doc.close()
+    if suffix in SUPPORTED_IMAGE_EXT:
+        with Image.open(path) as opened:
+            for img in _cuma_11006_iter_opened_image(opened):
+                return img
+        return None
+    if suffix in CUMA_11006_ARCHIVE_EXTS:
+        iterator = _cuma_11006_iter_archive_images(path)
+        try:
+            return next(iterator)
+        except StopIteration:
+            return None
+    return None
+
+
+def _tools_preview(self, kind: str) -> None:
+    paths = _tools_selected_paths(self, kind) or list(getattr(self, 'tools_extract_files' if kind == 'extract' else 'tools_create_files', []))[:1]
+    if not paths:
+        messagebox.showinfo('Prévia', 'Adicione ou selecione um arquivo.')
+        return
+    p = Path(paths[0])
+    if kind == 'extract':
+        try:
+            PreviewWindow(self, p)
+        except Exception as exc:
+            messagebox.showerror('Prévia', friendly_error(exc))
+        return
+    top = tk.Toplevel(self.root)
+    top.title(f'Prévia - {p.name}')
+    top.geometry('720x820')
+    try:
+        im = _cuma_11006_first_preview_image(p)
+        if im is None:
+            raise RuntimeError('Não consegui gerar prévia deste arquivo.')
+        try:
+            im.thumbnail((680, 760), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(im)
+            lbl = ttk.Label(top, image=photo)
+            lbl.image = photo
+            lbl.pack(padx=10, pady=10)
+            ttk.Label(top, text=str(p), style='Muted.TLabel', wraplength=680).pack()
+        finally:
+            try:
+                im.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        messagebox.showerror('Prévia', friendly_error(exc))
+        top.destroy()
+
+
+def _tools_process_create_pdf(self, selected=False) -> None:
+    paths = _tools_selected_paths(self, 'create') if selected else list(getattr(self, 'tools_create_files', []))
+    paths = [Path(p) for p in paths if _cuma_11006_accept_create_path(Path(p))]
+    if not paths:
+        messagebox.showinfo('Criar PDF', 'Adicione ou selecione imagens, PDFs, CBZ/ZIP/EPUB ou arquivos compactados com imagens.')
+        return
+
+    out_dir = _cuma_tab_output_dir('Ferramentas', True)
+    name = self.tools_pdf_name.get().strip() or 'imagens_unidas.pdf'
+    if not name.lower().endswith('.pdf'):
+        name += '.pdf'
+    output = unique_path(out_dir / name)
+    total_sources = len(paths)
+    total_pages = 0
+    debug = {
+        'acao': 'criar_pdf_a_partir_de_imagens_pdf_cbz_arquivos',
+        'versao': APP_DISPLAY_VERSION,
+        'arquivos': [str(p) for p in paths],
+        'saida': str(output),
+        'status': 'iniciado',
+        'resultados': []
+    }
+    out_doc = fitz.open()
+    try:
+        for source_index, p in enumerate(paths, 1):
+            suffix = p.suffix.lower()
+            _tools_set_tree_status(self, 'create', p, 'Processando')
+
+            def progress(done, max_value, src=p, index=source_index):
+                _tools_update_progress(
+                    self,
+                    'create',
+                    int(done),
+                    max(1, int(max_value)),
+                    index - 1,
+                    total_sources,
+                    f'{src.name}: {done}/{max_value}'
+                )
+
+            if suffix == '.pdf':
+                pages_added = _cuma_11006_append_pdf_source(out_doc, p, progress_cb=progress)
+            else:
+                pages_added = _cuma_11006_append_image_source(out_doc, p, progress_cb=progress)
+
+            total_pages += pages_added
+            _tools_set_tree_status(self, 'create', p, f'OK ({pages_added} pág.)')
+            _tools_update_progress(self, 'create', pages_added, max(1, pages_added), source_index, total_sources, f'Concluído: {p.name}')
+            debug['resultados'].append({'arquivo': str(p), 'paginas_adicionadas': pages_added})
+            self.log(f'Ferramentas / Criar PDF: {p.name} → {pages_added} página(s) adicionada(s)')
+
+        if total_pages <= 0:
+            raise RuntimeError('Nenhuma página foi adicionada ao PDF.')
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        _tools_update_progress(self, 'create', total_pages, max(1, total_pages), total_sources, total_sources, 'Salvando PDF...')
+        out_doc.save(str(output), garbage=4, deflate=True)
+        debug['status'] = 'ok'
+        debug['total_paginas'] = total_pages
+        self.log(f'Ferramentas / Criar PDF: {len(paths)} arquivo(s), {total_pages} página(s) → {output}')
+        self.tools_debug_var.set(f'PDF criado com {total_pages} página(s) de {len(paths)} arquivo(s): {output}')
+        _tools_update_progress(self, 'create', total_pages, max(1, total_pages), total_sources, total_sources, f'PDF criado: {output.name}')
+        if self.tools_pdf_open_after.get():
+            open_folder(output)
+        messagebox.showinfo('Criar PDF', f'PDF criado:\n{output}')
+    except Exception as exc:
+        debug['status'] = 'erro'
+        debug['erro'] = friendly_error(exc)
+        write_error_log(type(exc), exc, exc.__traceback__, 'Erro na ferramenta Criar PDF multiformato')
+        messagebox.showerror('Criar PDF', friendly_error(exc))
+    finally:
+        try:
+            out_doc.close()
+        except Exception:
+            pass
+        try:
+            (runtime_dir() / 'debug_ferramentas_criar_pdf_multiformato.json').write_text(json.dumps(debug, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+        except Exception:
+            pass
+
+
+_CUMA_11006_ORIG_TOOLS_MAKE_TAB = globals().get('_tools_make_clean_like_tab')
+def _tools_make_clean_like_tab(self, parent, kind: str, title: str, subtitle: str) -> None:
+    if kind == 'create':
+        title = 'Criar PDF de imagens/PDF/CBZ'
+        subtitle = 'Cria um PDF único usando imagens, PDFs, CBZ/ZIP/EPUB e arquivos compactados com imagens. A ordem da lista é respeitada.'
+    return _CUMA_11006_ORIG_TOOLS_MAKE_TAB(self, parent, kind, title, subtitle)
+
+
+def _cuma_11006_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11006_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11006_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11006_VERSION,
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'notes': 'A ferramenta Criar PDF agora aceita imagens, PDFs, CBZ/ZIP/EPUB e arquivos compactados com imagens.'
+        }
+        if 'cuma_version_apply_globals' in globals():
+            cuma_version_apply_globals(CUMA_11006_VERSION)
+    except Exception:
+        pass
+    try:
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            state = cuma_version_load_state()
+            events = state.get('events', []) if isinstance(state, dict) else []
+            if not isinstance(events, list):
+                events = []
+            if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11006_UPDATE_ID for e in events):
+                events.append({
+                    'update_id': CUMA_11006_UPDATE_ID,
+                    'version': CUMA_11006_VERSION,
+                    'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                    'scale': 'pouca',
+                    'description': 'Ferramentas/Criar PDF aceita imagens, PDFs, CBZ/ZIP/EPUB e compactados com imagens; preserva a ordem manual da lista.',
+                    'timestamp': datetime.now().isoformat(timespec='seconds')
+                })
+            state['events'] = events[-100:]
+            state['current_version'] = CUMA_11006_VERSION
+            state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+            cuma_version_save_state(state)
+            if '_cuma_version_write_public_files' in globals():
+                _cuma_version_write_public_files(state)
+    except Exception as exc:
+        _cuma_11006_log('Versionamento 1.100.6', exc)
+
+
+def _cuma_install_11006_create_pdf_multiformat() -> None:
+    try:
+        _cuma_11006_force_version()
+        globals()['_tools_accept_path'] = _tools_accept_path
+        globals()['_tools_add_files'] = _tools_add_files
+        globals()['_tools_preview'] = _tools_preview
+        globals()['_tools_process_create_pdf'] = _tools_process_create_pdf
+        globals()['_tools_make_clean_like_tab'] = _tools_make_clean_like_tab
+        try:
+            BaseApp.create_pdf_from_images_dialog = lambda self: _tools_process_create_pdf(self, selected=False)
+        except Exception:
+            pass
+    except Exception as exc:
+        _cuma_11006_log('Instalação patch 1.100.6', exc)
+
+
+_cuma_install_11006_create_pdf_multiformat()
+
+
+# =============================================================================
+# CUMA 1.100.7 - MANUAIS E HISTÓRICO CONSOLIDADOS
+# =============================================================================
+# Ajustes:
+# - Manual TXT da raiz e manual gerado pelo botão Manual alinhados com 1.100.7.
+# - README/LEIA-ME/histórico/arquivo de atualizações explicam as funções desde 1.100.2.
+# - Não altera o motor de processamento; é uma atualização documental.
+CUMA_11007_VERSION = '1.100.7'
+CUMA_11007_UPDATE_ID = 'manuais_historico_11007'
+CUMA_11007_MANUAL_TEXT = 'MANUAL COMPLETO DO CUMA - Conversor Ultimate de Mangás\nVersão: 1.100.7\nBase de versionamento: 1.080.0\n\n===============================================================================\nATUALIZAÇÃO 1.100.7 - MANUAIS E HISTÓRICO CONSOLIDADOS\n===============================================================================\n\nEsta atualização não muda o fluxo principal de processamento. Ela atualiza os\nmanuais e arquivos de apoio para explicar melhor as funções adicionadas desde a\nversão 1.100.2.\n\nO que foi alinhado:\n• Manual principal da raiz do pacote.\n• Manual completo em docs/manual_do_programa.txt.\n• README.md, LEIA-ME.txt e histórico de versões.\n• Manual TXT gerado pelo botão Manual do aplicativo.\n• Arquivo ATUALIZACOES_DESDE_1.100.2.txt com o resumo consolidado das versões.\n\nResumo rápido das funções recentes:\n• Limpar, Ferramentas e Converter permitem reordenar arquivos manualmente.\n• É possível clicar, segurar e arrastar uma linha da lista para cima ou para baixo.\n• Também existem botões "Mover pra cima ↑" e "Mover pra baixo ↓" acima das listas.\n• A aba Converter ficou mais compacta, sem o grande espaço vazio entre botões e lista.\n• Ferramentas > Criar PDF de imagens aceita imagens, PDFs, CBZ, ZIP e EPUB com imagens.\n• CBR, RAR e 7Z também podem ser usados nessa ferramenta quando o 7-Zip estiver\n  instalado e disponível no sistema.\n• A ordem visível da lista é respeitada no processamento.\n\n===============================================================================\n1. VISÃO GERAL\n===============================================================================\n\nO CUMA é um aplicativo desktop para Windows voltado a limpeza, organização e\nconversão de arquivos usados em mangás, quadrinhos, PDFs escaneados e leitura em\ne-readers.\n\nEle concentra quatro fluxos principais:\n\n1. Limpar PDFs, removendo páginas vazias ou pouco úteis.\n2. Exportar o resultado como PDF, PDF + CBZ, CBZ ou imagens.\n3. Usar ferramentas auxiliares para extrair páginas e montar PDFs a partir de\n   imagens, PDFs e arquivos compactados com imagens.\n4. Converter arquivos prontos para formatos como PDF, EPUB, CBZ, imagens e XTCH,\n   conforme o tipo de entrada detectado.\n\nA interface é dividida em áreas laterais:\n\n• Limpar: fluxo principal de limpeza, preparação visual e exportação.\n• Ferramentas: utilidades auxiliares, como extrair páginas e criar PDF de imagens.\n• Converter: conversão pura de formato, sem relimpar nem reaplicar filtros visuais.\n• Resultados: lista processos concluídos e arquivos gerados.\n• Registros: mostra mensagens internas, logs e diagnósticos.\n• Configurações: aparência, idioma, desempenho, segurança, logs e preferências.\n• Sobre: resumo do aplicativo, versão e acesso aos manuais.\n\nRegra mais importante:\n• Use Limpar para preparar ou modificar o conteúdo.\n• Use Converter para transformar o arquivo já pronto em outro formato.\n• Use Ferramentas quando precisar de ações auxiliares fora da fila principal.\n\n===============================================================================\n2. BOTÕES DO TOPO\n===============================================================================\n\nManual\nAbre o manual do CUMA. O aplicativo também grava um TXT de manual ao lado do\nprograma ou na pasta de execução, dependendo do modo de uso.\n\nLog\nAbre o arquivo de log quando ele existir. Use para investigar falhas, conferir\nmensagens internas ou enviar diagnóstico.\n\nProcurar atualizações\nVerifica o manifesto de atualização configurado no aplicativo. Quando houver\nfonte válida, compara a versão atual com a versão disponível.\n\nBotão de tema rápido\nAlterna rapidamente o tema claro/escuro quando disponível. As opções completas\nficam em Configurações.\n\n===============================================================================\n3. LISTAS DE ARQUIVOS E ORDEM MANUAL\n===============================================================================\n\nAs abas Limpar, Ferramentas e Converter usam listas de arquivos. A partir da\nversão 1.100.5, essas listas podem ser reorganizadas manualmente.\n\nComo mover com o mouse:\n1. Clique no arquivo desejado dentro da lista.\n2. Segure o clique.\n3. Arraste a linha para cima ou para baixo.\n4. Solte na posição desejada.\n\nComo mover com botões:\n• Selecione um arquivo na lista.\n• Clique em "Mover pra cima ↑" para subir uma posição.\n• Clique em "Mover pra baixo ↓" para descer uma posição.\n\nObservações:\n• A ordem visível da lista é a ordem usada no processamento.\n• Em Ferramentas > Criar PDF de imagens, essa ordem define a sequência das páginas\n  no PDF final.\n• Em lotes grandes, revise a ordem antes de clicar em Processar.\n• Use os botões de mover quando quiser um ajuste preciso de uma linha por vez.\n• Use arrastar e soltar dentro da lista quando precisar reorganizar vários itens\n  visualmente.\n\n===============================================================================\n4. ABA LIMPAR\n===============================================================================\n\nA aba Limpar é o fluxo principal do programa para PDFs.\n\nÁrea "Arraste PDFs ou pastas aqui"\nPermite soltar PDFs ou pastas diretamente na fila. Quando tkinterdnd2 não estiver\ninstalado, o aplicativo continua funcionando, mas o arrastar-e-soltar externo\npode ficar indisponível. Nesse caso, use os botões de seleção.\n\nAdicionar PDF(s)\nAdiciona um ou mais PDFs à fila.\n\nAdicionar pasta\nAdiciona PDFs encontrados dentro de uma pasta. Quando a opção de incluir\nsubpastas estiver marcada, também procura PDFs nas subpastas.\n\nColar caminho\nPermite colar manualmente caminhos de arquivos ou pastas.\n\nRemover\nRemove da fila os itens selecionados.\n\nLimpar lista\nEsvazia a fila da aba Limpar.\n\nMover pra cima ↑ / Mover pra baixo ↓\nReordena o arquivo selecionado dentro da fila.\n\nPrévia Limpar\nMostra a prévia correta das opções de limpeza e preparação visual. Essa prévia\nserve para conferir alterações antes do processamento.\n\nConfigurações do PDF\nAbre as opções que realmente modificam ou preparam o conteúdo antes da exportação.\nNessa janela ficam as opções de perfil visual e preparação, como:\n• Ordem de leitura Ocidental/Mangá.\n• Presets E-ink.\n• Remoção automática de margens.\n• Remoção de rodapé ou número de página.\n• Divisão de páginas duplas.\n• Manter a página original ao dividir.\n• Webtoon/imagens longas.\n• Prévia Limpar.\n\nPasta de saída\nDefine onde os arquivos limpos serão gravados. Essa pasta é independente da pasta\ndo Converter.\n\nSufixo\nTexto adicionado ao nome final. Exemplo: "capitulo01.pdf" com sufixo "_limpo"\nvira "capitulo01_limpo.pdf".\n\nFormato de exportação\nDefine o tipo de saída:\n• PDF: cria apenas o PDF limpo.\n• PDF + CBZ: cria o PDF limpo e um CBZ com as páginas mantidas.\n• CBZ: cria apenas o CBZ.\n• Imagens JPG: exporta as páginas mantidas como JPG.\n• Imagens PNG: exporta as páginas mantidas como PNG.\n\nIntervalo de páginas\nPermite limitar o processamento. Exemplos:\n• 1-10: processa da página 1 até a 10.\n• 1-5, 8, 12-15: processa blocos separados.\n• vazio: processa todas as páginas.\n\nAbrir resultado ao concluir\nQuando marcado, tenta abrir a pasta ou o arquivo final ao terminar.\n\nProcessar\nExecuta a limpeza conforme as opções configuradas.\n\nQuando usar Limpar:\n• Quando o PDF precisa passar por preparação visual.\n• Quando você quer remover páginas vazias ou pouco úteis.\n• Quando quer criar PDF/CBZ/imagens já limpos.\n• Quando quer aplicar corte, preset E-ink, divisão de página dupla ou webtoon.\n\n===============================================================================\n5. ABA FERRAMENTAS\n===============================================================================\n\nA aba Ferramentas reúne utilidades auxiliares que não dependem da fila principal\nda aba Limpar.\n\nEla possui duas subabas principais:\n\n-------------------------------------------------------------------------------\n5.1 EXTRAIR PÁGINAS\n-------------------------------------------------------------------------------\n\nA função Extrair páginas trabalha com PDFs.\n\nAdicionar PDF(s)\nAdiciona PDFs à lista de extração.\n\nAdicionar pasta\nAdiciona PDFs encontrados em uma pasta.\n\nColar caminho\nPermite colar caminhos manualmente.\n\nRemover / Limpar\nRemove itens selecionados ou limpa a lista inteira.\n\nMover pra cima ↑ / Mover pra baixo ↓\nReordena os PDFs da lista.\n\nArrastar dentro da lista\nTambém é possível clicar, segurar e mover um arquivo para outra posição.\n\nProcessar\nExtrai as páginas dos PDFs como imagens, conforme as opções disponíveis.\n\nQuando usar:\n• Para transformar páginas de PDF em PNG/JPG.\n• Para separar páginas antes de montar outro arquivo.\n• Para diagnóstico quando um PDF específico precisa ser conferido página por página.\n\n-------------------------------------------------------------------------------\n5.2 CRIAR PDF DE IMAGENS\n-------------------------------------------------------------------------------\n\nA função Criar PDF de imagens monta um PDF único a partir da lista exibida.\n\nTipos aceitos:\n• Imagens: JPG, JPEG, PNG, WEBP, BMP, TIF e TIFF.\n• PDF.\n• CBZ.\n• ZIP.\n• EPUB com imagens.\n• CBR, RAR e 7Z quando o 7-Zip estiver instalado e disponível no sistema.\n\nComo adicionar:\n• Use Adicionar arquivo(s) para selecionar imagens, PDFs ou arquivos com imagens.\n• Use Adicionar pasta para inserir arquivos encontrados em uma pasta.\n• Use Colar caminho para informar caminhos manualmente.\n• Também é possível arrastar arquivos/pastas para a área da ferramenta quando o\n  arrastar-e-soltar estiver disponível.\n\nOrdem:\n• A ordem da lista é a ordem do PDF final.\n• Use "Mover pra cima ↑", "Mover pra baixo ↓" ou arraste linhas na lista para\n  ajustar a sequência.\n• Em CBZ/ZIP/EPUB com imagens, as imagens internas são lidas em ordem natural.\n• Em PDFs adicionados à lista, as páginas entram na posição daquele PDF na lista.\n\nComo o PDF final é montado:\n• Imagens comuns entram como páginas.\n• PDFs entram página por página.\n• CBZ, ZIP e EPUB com imagens têm suas imagens internas extraídas temporariamente\n  e inseridas no PDF.\n• CBR, RAR e 7Z dependem do 7-Zip para extração.\n• A ferramenta respeita a ordem manual da lista antes de gerar o arquivo.\n\nLimitações:\n• EPUB textual puro não é renderizado nessa ferramenta.\n• EPUB com imagens é aceito.\n• Arquivos CBR/RAR/7Z exigem 7-Zip instalado e disponível no PATH do Windows.\n• Arquivos protegidos por senha podem falhar.\n\nQuando usar:\n• Para juntar capas, imagens soltas e capítulos em um PDF.\n• Para criar um PDF a partir de um CBZ/ZIP/EPUB de imagens.\n• Para juntar PDFs e imagens em uma sequência única.\n• Para reorganizar manualmente capítulos antes de gerar um PDF final.\n\n===============================================================================\n6. ABA CONVERTER\n===============================================================================\n\nA aba Converter transforma arquivos prontos em outros formatos. Ela foi ajustada\npara ser mais compacta visualmente e não exibir o grande espaço vazio entre os\nbotões e a lista.\n\nRegra da aba Converter:\n• Converter apenas converte formato.\n• Converter não relimpa o arquivo.\n• Converter não remove margens.\n• Converter não divide páginas duplas.\n• Converter não reaplica presets E-ink.\n• Converter não remove rodapé/número de página.\n• Converter não aplica webtoon/imagens longas.\n\nUse Limpar primeiro quando precisar modificar o conteúdo. Depois use Converter\npara gerar o formato final.\n\nÁrea "Arraste PDFs, EPUBs ou pastas aqui"\nPermite soltar arquivos ou pastas. O texto pode variar conforme a versão, mas a\nfunção é adicionar arquivos à lista de conversão.\n\nAdicionar arquivo(s)\nAdiciona arquivos compatíveis à fila do Converter.\n\nAdicionar pasta\nAdiciona arquivos compatíveis encontrados em uma pasta.\n\nColar caminho\nPermite colar caminhos manualmente.\n\nRemover\nRemove os itens selecionados.\n\nLimpar\nEsvazia a lista do Converter.\n\nPrévia\nMostra a prévia da entrada real que será enviada ao conversor, sem encaixar em\ncanvas branco de dispositivo nas conversões puras.\n\nFunções por tipo\nMostra ou atualiza as conversões disponíveis conforme o tipo de arquivo selecionado.\n\nMover pra cima ↑ / Mover pra baixo ↓\nReordena os arquivos da fila do Converter.\n\nArrastar dentro da lista\nPermite clicar, segurar e mover um arquivo para outra posição.\n\nDispositivo\nSeleciona um perfil de dispositivo. O perfil é importante principalmente para\nsaídas que exigem dimensões específicas, como XTCH.\n\nAplicar perfil\nAplica o perfil escolhido às opções de conversão compatíveis.\n\nEditor de perfis\nPermite criar ou ajustar perfis de dispositivo.\n\nPasta de saída\nDefine onde o Converter salvará seus arquivos. Essa pasta é separada da pasta da\naba Limpar.\n\nMetadados EPUB\nAparece somente quando o arquivo selecionado é EPUB ou quando alguma conversão de\nsaída para EPUB está marcada.\n\nConversões compatíveis por tipo:\n• PDF pode liberar PDF → EPUB, PDF → XTCH, PDF → CBZ e PDF → imagens.\n• EPUB pode liberar EPUB → XTCH e EPUB → PDF.\n• CBZ/ZIP/CBR/RAR/7Z podem liberar compactado → EPUB, compactado → XTCH e\n  compactado → PDF.\n• Imagens podem liberar imagem → PDF, imagem → EPUB e imagem → XTCH.\n\nDependências:\n• CBZ e ZIP funcionam nativamente.\n• CBR, RAR e 7Z dependem do 7-Zip instalado no Windows.\n• XTCH usa dimensões fixas de dispositivo por exigência do formato.\n\nQuando usar:\n• Para converter um arquivo que já está pronto.\n• Para gerar EPUB de imagens, CBZ, imagens ou XTCH.\n• Para adaptar arquivos a dispositivos Kindle, Kobo, reMarkable ou perfis\n  personalizados.\n• Para manter a preparação visual separada da conversão final.\n\n===============================================================================\n7. EDITOR DE PERFIS DE DISPOSITIVO\n===============================================================================\n\nO editor de perfis permite ajustar dimensões e parâmetros usados por conversões\nvoltadas a e-readers.\n\nUse quando:\n• O dispositivo desejado não estiver na lista.\n• O arquivo final precisa seguir uma resolução específica.\n• Você quer testar um perfil personalizado.\n\nDica:\nFaça um teste com poucos arquivos antes de converter uma coleção inteira.\n\n===============================================================================\n8. ABA RESULTADOS\n===============================================================================\n\nA aba Resultados mostra processos concluídos e arquivos gerados.\n\nUse para:\n• Confirmar quais arquivos foram criados.\n• Abrir pastas de saída.\n• Conferir se um lote terminou corretamente.\n\n===============================================================================\n9. ABA REGISTROS\n===============================================================================\n\nA aba Registros mostra mensagens internas, logs e diagnósticos.\n\nUse quando:\n• Uma conversão falhar.\n• Um arquivo não for aceito.\n• For necessário copiar informações para suporte.\n• Você quiser conferir caminhos de saída e mensagens de erro.\n\nArquivos relacionados:\n• CUMA.log.\n• erro.txt.\n• debug_completo_cuma.txt, quando gerado por --debug-env.\n\n===============================================================================\n10. ABA CONFIGURAÇÕES\n===============================================================================\n\nA aba Configurações centraliza preferências do aplicativo.\n\nItens comuns:\n• Tema e cores.\n• Idioma.\n• Desempenho.\n• Segurança.\n• Logs.\n• Preferências de abertura de resultados.\n• Opções de hardware quando disponíveis.\n\nAs configurações do usuário ficam em:\n%APPDATA%\\CUMA\\cuma_settings.json\n\nNão é necessário copiar esse arquivo para dentro da pasta do programa.\n\n===============================================================================\n11. ABA SOBRE\n===============================================================================\n\nA aba Sobre mostra:\n• Nome do aplicativo.\n• Versão.\n• Resumo do projeto.\n• Acesso aos manuais.\n• Informações gerais de suporte.\n\n===============================================================================\n12. SISTEMA DE VERSÕES\n===============================================================================\n\nBase oficial: 1.080.0.\n\nEscalas usadas pelo projeto:\n• grande: incrementa o primeiro número e zera os demais.\n  Exemplo: 1.100.0 → 2.000.0\n• média: soma 10 ao bloco central e zera correções.\n  Exemplo: 1.080.0 → 1.090.0\n• pequena: soma 1 ao bloco central e zera correções.\n  Exemplo: 1.080.0 → 1.081.0\n• pouca/hotfix: soma 1 ao terceiro número.\n  Exemplo: 1.100.6 → 1.100.7\n\n===============================================================================\n13. ARQUIVOS E DADOS DO USUÁRIO\n===============================================================================\n\nArquivos principais do pacote:\n• cuma.py: código principal.\n• cuma.spec: receita de build PyInstaller.\n• requirements.txt: dependências Python.\n• rodar_cuma.bat: abre o programa no Windows com ambiente preparado.\n• criar_exe_windows_e_zip.bat: compila e compacta o executável.\n• app_icon.ico e cuma_logo.png: ícone e logo.\n• manual_do_programa.txt: manual completo.\n• LEIA-ME.txt: resumo rápido de uso.\n• README.md: descrição para GitHub.\n• docs/manual_do_programa.txt: cópia do manual completo para documentação.\n• docs/historico_versoes.md: histórico das versões.\n• ATUALIZACOES_DESDE_1.100.2.txt: resumo consolidado das alterações recentes.\n\nArquivos que não devem ser enviados como parte limpa da release:\n• limpos/\n• CUMA.log\n• erro.txt\n• debug_completo_cuma.txt\n• arquivos convertidos\n• builds antigas\n• __pycache__/\n• *.pyc\n\nDados do usuário no Windows:\n%APPDATA%\\CUMA\\\n\nDentro dessa pasta podem ficar:\n• cuma_settings.json.\n• CUMA.log.\n• erro.txt.\n• debug_completo_cuma.txt.\n\n===============================================================================\n14. LIMITAÇÕES CONHECIDAS\n===============================================================================\n\n• EPUB textual puro não é renderizado em Ferramentas > Criar PDF de imagens.\n• EPUB com imagens é aceito nessa ferramenta.\n• CBR/RAR/7Z dependem do 7-Zip instalado e disponível no PATH.\n• tkinterdnd2 é opcional; sem ele, o arrastar-e-soltar externo pode não funcionar.\n• Arquivos protegidos por senha podem falhar.\n• Arquivos muito grandes podem demorar e consumir bastante memória.\n• A detecção de páginas vazias é visual/heurística; revise o PDF de removidas\n  antes de apagar originais.\n• XTCH exige dimensões fixas de dispositivo, então o perfil escolhido importa.\n\n===============================================================================\n15. FLUXOS RECOMENDADOS\n===============================================================================\n\nFluxo seguro para limpeza:\n1. Abra o CUMA.\n2. Vá para Limpar.\n3. Adicione um PDF de teste.\n4. Ajuste Configurações do PDF se necessário.\n5. Use Prévia Limpar.\n6. Processe.\n7. Confira o resultado antes de rodar lotes grandes.\n\nFluxo para criar PDF a partir de imagens/PDF/CBZ:\n1. Vá para Ferramentas.\n2. Abra Criar PDF de imagens.\n3. Adicione imagens, PDFs, CBZ, ZIP ou EPUB com imagens.\n4. Reordene a lista com arraste ou com "Mover pra cima ↑" e "Mover pra baixo ↓".\n5. Processe e confira o PDF final.\n\nFluxo para converter arquivo pronto:\n1. Prepare o arquivo em Limpar, se ele precisar de ajustes visuais.\n2. Vá para Converter.\n3. Adicione o arquivo pronto.\n4. Escolha dispositivo e formato de saída quando aplicável.\n5. Confira as conversões compatíveis.\n6. Processe.\n7. Teste o resultado no leitor ou dispositivo real.\n\nFluxo para diagnóstico:\n1. Abra Registros.\n2. Copie as mensagens relevantes.\n3. Verifique CUMA.log e erro.txt, se existirem.\n4. Execute python cuma.py --debug-env quando precisar gerar diagnóstico completo.\n'
+CUMA_11007_README_TXT = 'CUMA - Conversor Ultimate de Mangás\nVersão: 1.100.7\n\nCOMO USAR\n1. Extraia o ZIP inteiro.\n2. Abra cuma.exe.\n3. Não apague a pasta _internal.\n4. O manual completo está em manual_do_programa.txt.\n5. O resumo das mudanças recentes está em ATUALIZACOES_DESDE_1.100.2.txt.\n\nNOVIDADES RECENTES\n- Limpar, Ferramentas e Converter permitem mover arquivos com arraste ou com os botões "Mover pra cima ↑" e "Mover pra baixo ↓".\n- A aba Converter está mais compacta, sem o grande espaço vazio entre botões e lista.\n- Ferramentas > Criar PDF de imagens aceita imagens, PDFs, CBZ, ZIP, EPUB com imagens e, com 7-Zip, CBR/RAR/7Z.\n- Os manuais foram atualizados para explicar essas funções.\n\nESTRUTURA RECOMENDADA\nCUMA/\n  cuma.exe\n  manual_do_programa.txt\n  ATUALIZACOES_DESDE_1.100.2.txt\n  LEIA-ME.txt\n  _internal/\n\nDADOS DO USUÁRIO\nAs configurações ficam em um único arquivo:\n%APPDATA%\\CUMA\\cuma_settings.json\n\nLogs e relatórios de erro também ficam em %APPDATA%\\CUMA quando forem necessários.\n\nOBSERVAÇÃO\nNão distribua a pasta limpos/, arquivos convertidos, CUMA.log, erro.txt ou arquivos de debug.\n'
+
+
+def _cuma_11007_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        msg = f'[CUMA 1.100.7] {context}' if exc is None else f'[CUMA 1.100.7] {context}: {exc}'
+        write_log(msg)
+    except Exception:
+        pass
+
+
+def ensure_manual() -> Path:
+    try:
+        manual_path().write_text(CUMA_11007_MANUAL_TEXT, encoding='utf-8')
+    except Exception as exc:
+        _cuma_11007_log('Falha ao gerar manual 1.100.7', exc)
+    return manual_path()
+
+
+def _cuma_11007_write_readme() -> None:
+    try:
+        target = app_dir() / 'LEIA-ME.txt'
+        target.write_text(CUMA_11007_README_TXT, encoding='utf-8')
+    except Exception as exc:
+        _cuma_11007_log('Falha ao atualizar LEIA-ME 1.100.7', exc)
+
+
+def _cuma_11007_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11007_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11007_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11007_VERSION,
+            'date': '2026-06-23',
+            'items': [
+                'Manuais atualizados para explicar reordenação manual nas abas Limpar, Ferramentas e Converter.',
+                'Documentação atualizada para Criar PDF de imagens com PDFs e arquivos compactados com imagens.',
+                'Criado ATUALIZACOES_DESDE_1.100.2.txt com o resumo consolidado das versões recentes.'
+            ]
+        }
+        if 'cuma_settings_load' in globals() and 'cuma_settings_save' in globals():
+            try:
+                data = cuma_settings_load()
+                if isinstance(data, dict):
+                    version_payload = data.get('version') if isinstance(data.get('version'), dict) else {}
+                    version_payload.update({
+                        'version': CUMA_11007_VERSION,
+                        'updated_at': '2026-06-23',
+                        'notes': 'Manuais atualizados e arquivo de atualizações desde 1.100.2 adicionado.'
+                    })
+                    data['version'] = version_payload
+                    cuma_settings_save(data)
+            except Exception as exc:
+                _cuma_11007_log('Atualizar settings de versão 1.100.7', exc)
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            try:
+                state = cuma_version_load_state()
+                if not isinstance(state, dict):
+                    state = {}
+                events = state.get('events', [])
+                if not isinstance(events, list):
+                    events = []
+                if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11007_UPDATE_ID for e in events):
+                    events.append({
+                        'update_id': CUMA_11007_UPDATE_ID,
+                        'version': CUMA_11007_VERSION,
+                        'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                        'scale': 'pouca',
+                        'description': 'Manuais e histórico consolidados; arquivo ATUALIZACOES_DESDE_1.100.2.txt adicionado.',
+                        'timestamp': datetime.now().isoformat(timespec='seconds')
+                    })
+                state['events'] = events[-100:]
+                state['current_version'] = CUMA_11007_VERSION
+                state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+                cuma_version_save_state(state)
+                if '_cuma_version_write_public_files' in globals():
+                    _cuma_version_write_public_files(state)
+            except Exception as exc:
+                _cuma_11007_log('Versionamento 1.100.7', exc)
+    except Exception as exc:
+        _cuma_11007_log('Forçar versão 1.100.7', exc)
+
+
+def _cuma_install_11007_manuals_and_history() -> None:
+    try:
+        _cuma_11007_force_version()
+        try:
+            ensure_manual()
+        except Exception:
+            pass
+        try:
+            _cuma_11007_write_readme()
+        except Exception:
+            pass
+    except Exception as exc:
+        _cuma_11007_log('Instalação patch 1.100.7', exc)
+
+
+_cuma_install_11007_manuals_and_history()
+
+
+
+
+# =============================================================================
+# CUMA 1.100.8 - CORREÇÕES DE AUDITORIA E ROBUSTEZ
+# =============================================================================
+# Correções principais:
+# - Escrita atômica/temporária para EPUB, CBZ e PDFs gerados.
+# - Correção de CBZ/ZIP no Converter em modo puro.
+# - Validação de arquivos existentes nas abas Ferramentas.
+# - Limite de leitura por item em compactados para reduzir risco de consumo excessivo de memória.
+# - Versionamento e documentação alinhados com 1.100.8.
+CUMA_11008_VERSION = '1.100.8'
+CUMA_11008_UPDATE_ID = 'auditoria_robustez_codigo_11008'
+CUMA_11008_MAX_ARCHIVE_ENTRY_BYTES = 512 * 1024 * 1024
+
+
+def _cuma_11008_log(context: str, exc: Exception | None = None) -> None:
+    try:
+        msg = f'[CUMA 1.100.8] {context}' if exc is None else f'[CUMA 1.100.8] {context}: {type(exc).__name__}: {exc}'
+        write_log(msg)
+    except Exception:
+        pass
+
+
+def _cuma_11008_path_key(value) -> str:
+    # Chave de identidade de caminho sem reduzir maiúsculas/minúsculas em sistemas case-sensitive.
+    try:
+        resolved = Path(value).expanduser().resolve()
+        raw = str(resolved) if os.name == 'nt' else resolved.as_posix()
+        return os.path.normcase(raw) if os.name == 'nt' else raw
+    except Exception:
+        raw = str(value)
+        return os.path.normcase(raw) if os.name == 'nt' else raw
+
+
+def _cuma_11008_tmp_path(target: Path) -> Path:
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.with_name(f'.{target.name}.{uuid.uuid4().hex}.tmp')
+
+
+def _cuma_11008_replace_atomically(tmp_path: Path, final_path: Path) -> None:
+    os.replace(str(tmp_path), str(final_path))
+
+
+def _cuma_11008_read_zip_member_limited(zf: zipfile.ZipFile, name: str, max_bytes: int = CUMA_11008_MAX_ARCHIVE_ENTRY_BYTES) -> bytes:
+    try:
+        info = zf.getinfo(name)
+        if int(getattr(info, 'file_size', 0) or 0) > max_bytes:
+            raise RuntimeError(f'Arquivo interno muito grande: {name} ({info.file_size} bytes).')
+    except KeyError:
+        raise
+    with zf.open(name) as f:
+        data = f.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise RuntimeError(f'Arquivo interno excede o limite de {max_bytes} bytes: {name}.')
+    return data
+
+
+def _cuma_11008_image_from_zip_member(zf: zipfile.ZipFile, name: str) -> Image.Image:
+    data = BytesIO(_cuma_11008_read_zip_member_limited(zf, name))
+    with Image.open(data) as opened:
+        return opened.convert('RGB')
+
+
+def _cuma_11008_create_image_epub_from_iter(image_iter, output_epub: Path, title: str, quality: int = 92) -> None:
+    output_epub = Path(output_epub)
+    tmp_epub = _cuma_11008_tmp_path(output_epub)
+    tmp_epub.unlink(missing_ok=True)
+    uid = str(uuid.uuid4())
+    manifest = []
+    spine = []
+    nav = []
+    meta = _cuma_11000_epub_metadata(title) if '_cuma_11000_epub_metadata' in globals() else {'title': title or 'CUMA', 'language': 'pt-BR'}
+    count = 0
+    try:
+        with zipfile.ZipFile(tmp_epub, 'w') as z:
+            z.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+            z.writestr('META-INF/container.xml', '''<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>''')
+            for count, im in enumerate(image_iter, 1):
+                try:
+                    img_name = f'images/page_{count:04d}.jpg'
+                    html_name = f'page_{count:04d}.xhtml'
+                    bio = BytesIO()
+                    q = int(max(50, min(100, quality or 92)))
+                    im.convert('RGB').save(bio, format='JPEG', quality=q, optimize=True)
+                    z.writestr('OEBPS/' + img_name, bio.getvalue(), compress_type=zipfile.ZIP_DEFLATED)
+                    z.writestr('OEBPS/' + html_name, f'''<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Página {count}</title><style>html,body{{margin:0;padding:0;background:white;}} img{{width:100%;height:100%;object-fit:contain;display:block;}}</style></head><body><img src="{img_name}" alt="Página {count}"/></body></html>''', compress_type=zipfile.ZIP_DEFLATED)
+                    manifest.append(f'<item id="p{count}" href="{html_name}" media-type="application/xhtml+xml"/>')
+                    manifest.append(f'<item id="img{count}" href="{img_name}" media-type="image/jpeg"/>')
+                    spine.append(f'<itemref idref="p{count}"/>')
+                    nav.append(f'<li><a href="{html_name}">Página {count}</a></li>')
+                finally:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+            if count <= 0:
+                raise RuntimeError('Nenhuma imagem para criar EPUB.')
+            z.writestr('OEBPS/nav.xhtml', f'''<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Sumário</title></head><body><nav epub:type="toc"><ol>{''.join(nav)}</ol></nav></body></html>''', compress_type=zipfile.ZIP_DEFLATED)
+            meta_writer = globals().get('_cuma_11000_epub_opf_metadata')
+            meta_xml = meta_writer(meta, uid) if callable(meta_writer) else f'<dc:identifier id="uid">{uid}</dc:identifier><dc:title>{html.escape(title or "CUMA")}</dc:title><dc:language>pt-BR</dc:language>'
+            z.writestr('OEBPS/content.opf', f'''<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">{meta_xml}</metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>{''.join(manifest)}</manifest><spine>{''.join(spine)}</spine></package>''', compress_type=zipfile.ZIP_DEFLATED)
+        _cuma_11008_replace_atomically(tmp_epub, output_epub)
+    except Exception:
+        tmp_epub.unlink(missing_ok=True)
+        raise
+
+
+def _cuma_11008_create_image_epub(images: list[Image.Image], output_epub: Path, title: str, quality: int = 92) -> None:
+    if not images:
+        raise RuntimeError('Nenhuma imagem para criar EPUB.')
+    return _cuma_11008_create_image_epub_from_iter(iter(images), output_epub, title, quality)
+
+
+def _cuma_11008_create_image_epub_from_pdf(pdf_path: Path, output_epub: Path, title: str, target: Optional[tuple[int, int]] = None, quality: int = 92) -> None:
+    return _cuma_11008_create_image_epub_from_iter(_cuma_11000_iter_pdf_pages_as_images(pdf_path, target=target), output_epub, title, quality)
+
+
+def _cuma_11008_create_epub_from_archive(archive_path: Path, output_epub: Path, title: str, target: Optional[tuple[int, int]] = None, quality: int = 92) -> None:
+    return _cuma_11008_create_image_epub_from_iter(_cuma_11000_iter_archive_images(archive_path, target=target), output_epub, title, quality)
+
+
+def _cuma_11008_iter_archive_images(archive_path: Path, target: Optional[tuple[int, int]] = None):
+    settings = _cuma_11000_processing_settings()
+    suffix = Path(archive_path).suffix.lower()
+    if suffix in ('.zip', '.cbz'):
+        with zipfile.ZipFile(archive_path, 'r') as z:
+            for name in _cuma_11000_archive_image_names(z):
+                try:
+                    im = _cuma_11008_image_from_zip_member(z, name)
+                    try:
+                        if im.width < 80 or im.height < 80:
+                            continue
+                        for processed in _cuma_11000_process_source_image(im, target, settings):
+                            yield processed
+                    finally:
+                        try:
+                            im.close()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    _cuma_11008_log(f'Imagem ignorada no compactado: {name}', exc)
+    elif suffix in ('.cbr', '.rar', '.7z'):
+        with tempfile.TemporaryDirectory(prefix='cuma_archive_') as td:
+            files = _cuma_11000_extract_with_7z(archive_path, Path(td))
+            for p in files:
+                try:
+                    with Image.open(p) as opened:
+                        im = opened.convert('RGB')
+                    try:
+                        if im.width < 80 or im.height < 80:
+                            continue
+                        for processed in _cuma_11000_process_source_image(im, target, settings):
+                            yield processed
+                    finally:
+                        try:
+                            im.close()
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    _cuma_11008_log(f'Imagem ignorada no compactado: {p.name}', exc)
+    else:
+        raise RuntimeError('Arquivo compactado não suportado. Use CBZ, ZIP, CBR, RAR ou 7Z.')
+
+
+def _cuma_11008_iter_epub_images(epub_path: Path, target: tuple[int, int]):
+    if not Path(epub_path).exists():
+        raise RuntimeError('EPUB não encontrado.')
+    settings = _cuma_11000_processing_settings()
+    with zipfile.ZipFile(epub_path, 'r') as z:
+        names = sorted([n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT], key=_cuma_11000_natural_key)
+        for name in names:
+            try:
+                im = _cuma_11008_image_from_zip_member(z, name)
+                try:
+                    if im.width < 80 or im.height < 80:
+                        continue
+                    for processed in _cuma_11000_process_source_image(im, target, settings):
+                        yield processed
+                finally:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                _cuma_11008_log(f'Imagem ignorada no EPUB: {name}', exc)
+
+
+def _cuma_11008_iter_archive_images_raw(archive_path: Path):
+    archive_path = Path(archive_path)
+    suffix = archive_path.suffix.lower()
+    if suffix in ('.zip', '.cbz'):
+        with zipfile.ZipFile(archive_path, 'r') as z:
+            names = _cuma_11000_archive_image_names(z) if '_cuma_11000_archive_image_names' in globals() else sorted(
+                [n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT],
+                key=_natural_key
+            )
+            for name in names:
+                try:
+                    im = _cuma_11008_image_from_zip_member(z, name)
+                    if im.width < 80 or im.height < 80:
+                        try:
+                            im.close()
+                        except Exception:
+                            pass
+                        continue
+                    yield im
+                except Exception as exc:
+                    _cuma_11008_log(f'Imagem ignorada no compactado: {name}', exc)
+    elif suffix in ('.cbr', '.rar', '.7z'):
+        with tempfile.TemporaryDirectory(prefix='cuma_archive_raw_') as td:
+            files = _cuma_11000_extract_with_7z(archive_path, Path(td))
+            for p in files:
+                try:
+                    with Image.open(p) as opened:
+                        rgb = opened.convert('RGB')
+                    if rgb.width < 80 or rgb.height < 80:
+                        try:
+                            rgb.close()
+                        except Exception:
+                            pass
+                        continue
+                    yield rgb
+                except Exception as exc:
+                    _cuma_11008_log(f'Imagem ignorada no compactado: {p.name}', exc)
+    else:
+        raise RuntimeError('Arquivo compactado não suportado. Use CBZ, ZIP, CBR, RAR ou 7Z.')
+
+
+def _cuma_11008_iter_epub_images_raw(epub_path: Path):
+    with zipfile.ZipFile(epub_path, 'r') as z:
+        names = sorted([n for n in z.namelist() if Path(n).suffix.lower() in SUPPORTED_IMAGE_EXT], key=_cuma_11000_natural_key)
+        for name in names:
+            try:
+                im = _cuma_11008_image_from_zip_member(z, name)
+                if im.width < 80 or im.height < 80:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+                    continue
+                yield im
+            except Exception as exc:
+                _cuma_11008_log(f'Imagem ignorada no EPUB: {name}', exc)
+
+
+def _cuma_11008_create_pdf_from_image_iter(image_iter, output_pdf: Path) -> None:
+    output_pdf = Path(output_pdf)
+    tmp_pdf = _cuma_11008_tmp_path(output_pdf)
+    tmp_pdf.unlink(missing_ok=True)
+    doc = fitz.open()
+    count = 0
+    try:
+        for im in image_iter:
+            count += 1
+            rgb = None
+            try:
+                rgb = im.convert('RGB')
+                bio = BytesIO()
+                rgb.save(bio, format='JPEG', quality=92, optimize=True)
+                page = doc.new_page(width=max(1, rgb.width), height=max(1, rgb.height))
+                page.insert_image(page.rect, stream=bio.getvalue())
+            finally:
+                try:
+                    if rgb is not None and rgb is not im:
+                        rgb.close()
+                except Exception:
+                    pass
+                try:
+                    im.close()
+                except Exception:
+                    pass
+        if count <= 0:
+            raise RuntimeError('Nenhuma imagem para criar PDF.')
+        doc.save(str(tmp_pdf), garbage=4, deflate=True)
+        _cuma_11008_replace_atomically(tmp_pdf, output_pdf)
+    except Exception:
+        tmp_pdf.unlink(missing_ok=True)
+        raise
+    finally:
+        doc.close()
+
+
+def _cuma_11008_create_cbz_from_image_iter(image_iter, output_cbz: Path, quality: int = 92) -> None:
+    output_cbz = Path(output_cbz)
+    tmp_cbz = _cuma_11008_tmp_path(output_cbz)
+    tmp_cbz.unlink(missing_ok=True)
+    count = 0
+    try:
+        with zipfile.ZipFile(tmp_cbz, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+            for im in image_iter:
+                count += 1
+                try:
+                    bio = BytesIO()
+                    im.convert('RGB').save(bio, format='JPEG', quality=int(max(50, min(100, quality or 92))), optimize=True)
+                    z.writestr(f'page_{count:04d}.jpg', bio.getvalue())
+                finally:
+                    try:
+                        im.close()
+                    except Exception:
+                        pass
+        if count <= 0:
+            raise RuntimeError('Nenhuma imagem para criar CBZ.')
+        _cuma_11008_replace_atomically(tmp_cbz, output_cbz)
+    except Exception:
+        tmp_cbz.unlink(missing_ok=True)
+        raise
+
+
+def _cuma_11008_accept_create_path(path: Path) -> bool:
+    try:
+        p = Path(path)
+        return p.is_file() and p.suffix.lower() in CUMA_11006_CREATE_PDF_EXTS
+    except Exception:
+        return False
+
+
+def _tools_accept_path(path: Path, kind: str) -> bool:
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return False
+        suffix = p.suffix.lower()
+        if kind == 'extract':
+            return suffix == '.pdf'
+        if kind == 'create':
+            return suffix in CUMA_11006_CREATE_PDF_EXTS
+        if _CUMA_11006_ORIG_TOOLS_ACCEPT_PATH:
+            return _CUMA_11006_ORIG_TOOLS_ACCEPT_PATH(p, kind)
+    except Exception:
+        return False
+    return False
+
+
+def _cuma_11008_iter_archive_images_for_create(path: Path):
+    suffix = Path(path).suffix.lower()
+    if suffix in ('.cbz', '.zip', '.epub'):
+        with zipfile.ZipFile(path, 'r') as zf:
+            names = _cuma_11006_image_names_from_zip(zf)
+            if not names:
+                raise RuntimeError(f'Não encontrei imagens dentro de {Path(path).name}.')
+            for name in names:
+                try:
+                    with Image.open(BytesIO(_cuma_11008_read_zip_member_limited(zf, name))) as opened:
+                        for img in _cuma_11006_iter_opened_image(opened):
+                            yield img
+                except Exception as exc:
+                    _cuma_11008_log(f'Imagem ignorada em {Path(path).name}: {name}', exc)
+    elif suffix in ('.cbr', '.rar', '.7z'):
+        with tempfile.TemporaryDirectory(prefix='cuma_criar_pdf_') as td:
+            files = _cuma_11006_extract_archive_with_7z(path, Path(td))
+            if not files:
+                raise RuntimeError(f'Não encontrei imagens dentro de {Path(path).name}.')
+            for img_path in files:
+                try:
+                    for img in _cuma_11006_iter_image_file(img_path):
+                        yield img
+                except Exception as exc:
+                    _cuma_11008_log(f'Imagem ignorada em {Path(path).name}: {img_path.name}', exc)
+    else:
+        raise RuntimeError(f'Arquivo compactado não suportado: {Path(path).name}')
+
+
+def _cuma_11008_iter_source_images_for_create(path: Path):
+    suffix = Path(path).suffix.lower()
+    if suffix in SUPPORTED_IMAGE_EXT:
+        yield from _cuma_11006_iter_image_file(path)
+    elif suffix in CUMA_11006_ARCHIVE_EXTS:
+        yield from _cuma_11008_iter_archive_images_for_create(path)
+    else:
+        raise RuntimeError(f'Formato não suportado para criar PDF: {Path(path).name}')
+
+
+def _cuma_11008_append_image_source(out_doc, source_path: Path, progress_cb=None) -> int:
+    count = 0
+    for img in _cuma_11008_iter_source_images_for_create(source_path):
+        try:
+            _cuma_11006_add_image_page(out_doc, img)
+            count += 1
+            if progress_cb:
+                progress_cb(count, max(1, count))
+        finally:
+            try:
+                img.close()
+            except Exception:
+                pass
+    if count <= 0:
+        raise RuntimeError(f'Nenhuma imagem válida em {Path(source_path).name}.')
+    return count
+
+
+def _tools_process_create_pdf(self, selected=False) -> None:
+    paths = _tools_selected_paths(self, 'create') if selected else list(getattr(self, 'tools_create_files', []))
+    paths = [Path(p) for p in paths if _cuma_11008_accept_create_path(Path(p))]
+    if not paths:
+        messagebox.showinfo('Criar PDF', 'Adicione ou selecione imagens, PDFs, CBZ/ZIP/EPUB ou arquivos compactados com imagens.')
+        return
+
+    out_dir = _cuma_tab_output_dir('Ferramentas', True)
+    name = self.tools_pdf_name.get().strip() or 'imagens_unidas.pdf'
+    if not name.lower().endswith('.pdf'):
+        name += '.pdf'
+    output = unique_path(out_dir / name)
+    tmp_output = _cuma_11008_tmp_path(output)
+    total_sources = len(paths)
+    total_pages = 0
+    debug = {
+        'acao': 'criar_pdf_a_partir_de_imagens_pdf_cbz_arquivos',
+        'versao': APP_DISPLAY_VERSION,
+        'arquivos': [str(p) for p in paths],
+        'saida': str(output),
+        'status': 'iniciado',
+        'resultados': []
+    }
+    out_doc = fitz.open()
+    try:
+        for source_index, p in enumerate(paths, 1):
+            suffix = p.suffix.lower()
+            _tools_set_tree_status(self, 'create', p, 'Processando')
+
+            def progress(done, max_value, src=p, index=source_index):
+                _tools_update_progress(
+                    self,
+                    'create',
+                    int(done),
+                    max(1, int(max_value)),
+                    index - 1,
+                    total_sources,
+                    f'{src.name}: {done}/{max_value}'
+                )
+
+            if suffix == '.pdf':
+                pages_added = _cuma_11006_append_pdf_source(out_doc, p, progress_cb=progress)
+            else:
+                pages_added = _cuma_11008_append_image_source(out_doc, p, progress_cb=progress)
+
+            total_pages += pages_added
+            _tools_set_tree_status(self, 'create', p, f'OK ({pages_added} pág.)')
+            _tools_update_progress(self, 'create', pages_added, max(1, pages_added), source_index, total_sources, f'Concluído: {p.name}')
+            debug['resultados'].append({'arquivo': str(p), 'paginas_adicionadas': pages_added})
+            self.log(f'Ferramentas / Criar PDF: {p.name} → {pages_added} página(s) adicionada(s)')
+
+        if total_pages <= 0:
+            raise RuntimeError('Nenhuma página foi adicionada ao PDF.')
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp_output.unlink(missing_ok=True)
+        _tools_update_progress(self, 'create', total_pages, max(1, total_pages), total_sources, total_sources, 'Salvando PDF...')
+        out_doc.save(str(tmp_output), garbage=4, deflate=True)
+        _cuma_11008_replace_atomically(tmp_output, output)
+        debug['status'] = 'ok'
+        debug['total_paginas'] = total_pages
+        self.log(f'Ferramentas / Criar PDF: {len(paths)} arquivo(s), {total_pages} página(s) → {output}')
+        self.tools_debug_var.set(f'PDF criado com {total_pages} página(s) de {len(paths)} arquivo(s): {output}')
+        _tools_update_progress(self, 'create', total_pages, max(1, total_pages), total_sources, total_sources, f'PDF criado: {output.name}')
+        if self.tools_pdf_open_after.get():
+            open_folder(output)
+        messagebox.showinfo('Criar PDF', f'PDF criado:\n{output}')
+    except Exception as exc:
+        tmp_output.unlink(missing_ok=True)
+        debug['status'] = 'erro'
+        debug['erro'] = friendly_error(exc)
+        write_error_log(type(exc), exc, exc.__traceback__, 'Erro na ferramenta Criar PDF multiformato')
+        messagebox.showerror('Criar PDF', friendly_error(exc))
+    finally:
+        try:
+            out_doc.close()
+        except Exception:
+            pass
+        try:
+            (runtime_dir() / 'debug_ferramentas_criar_pdf_multiformato.json').write_text(json.dumps(debug, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+        except Exception:
+            pass
+
+
+def _cuma_11008_first_preview_image(path: Path):
+    suffix = Path(path).suffix.lower()
+    if suffix == '.pdf':
+        doc = fitz.open(str(path))
+        try:
+            if len(doc) <= 0:
+                return None
+            page = doc[0]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+            return Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+        finally:
+            doc.close()
+    if suffix in SUPPORTED_IMAGE_EXT:
+        with Image.open(path) as opened:
+            for img in _cuma_11006_iter_opened_image(opened):
+                return img
+        return None
+    if suffix in CUMA_11006_ARCHIVE_EXTS:
+        iterator = _cuma_11008_iter_archive_images_for_create(path)
+        try:
+            return next(iterator)
+        except StopIteration:
+            return None
+    return None
+
+
+def _cuma_11008_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11008_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11008_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11008_VERSION,
+            'date': '2026-06-23',
+            'items': [
+                'Correções da auditoria: CBZ/ZIP, CBR/RAR/7Z, escrita atômica e validação de arquivos.',
+                'Ferramentas e Converter ficaram mais robustos contra arquivos parciais e entradas inválidas.',
+                'Pacote de release ajustado para não incluir dados locais do usuário.'
+            ]
+        }
+        if 'cuma_version_apply_globals' in globals():
+            try:
+                cuma_version_apply_globals(CUMA_11008_VERSION)
+            except Exception:
+                pass
+        if 'cuma_settings_load' in globals() and 'cuma_settings_save' in globals():
+            try:
+                data = cuma_settings_load()
+                if isinstance(data, dict):
+                    version_payload = data.get('version') if isinstance(data.get('version'), dict) else {}
+                    version_payload.update({
+                        'version': CUMA_11008_VERSION,
+                        'updated_at': '2026-06-23',
+                        'notes': 'Correções de auditoria, robustez de escrita e empacotamento.'
+                    })
+                    data['version'] = version_payload
+                    cuma_settings_save(data)
+            except Exception as exc:
+                _cuma_11008_log('Atualizar settings de versão 1.100.8', exc)
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            try:
+                state = cuma_version_load_state()
+                if not isinstance(state, dict):
+                    state = {}
+                events = state.get('events', [])
+                if not isinstance(events, list):
+                    events = []
+                if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11008_UPDATE_ID for e in events):
+                    events.append({
+                        'update_id': CUMA_11008_UPDATE_ID,
+                        'version': CUMA_11008_VERSION,
+                        'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                        'scale': 'pouca',
+                        'description': 'Correções de auditoria: escrita atômica, validações, compactados e limpeza do pacote.',
+                        'timestamp': datetime.now().isoformat(timespec='seconds')
+                    })
+                state['events'] = events[-100:]
+                state['current_version'] = CUMA_11008_VERSION
+                state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+                cuma_version_save_state(state)
+                if '_cuma_version_write_public_files' in globals():
+                    _cuma_version_write_public_files(state)
+            except Exception as exc:
+                _cuma_11008_log('Versionamento 1.100.8', exc)
+    except Exception as exc:
+        _cuma_11008_log('Forçar versão 1.100.8', exc)
+
+
+def _cuma_install_11008_audit_fixes() -> None:
+    try:
+        globals()['_cuma_11000_create_image_epub_from_iter'] = _cuma_11008_create_image_epub_from_iter
+        globals()['_cuma_11000_create_image_epub'] = _cuma_11008_create_image_epub
+        globals()['_cuma_11000_create_image_epub_from_pdf'] = _cuma_11008_create_image_epub_from_pdf
+        globals()['_cuma_11000_create_epub_from_archive'] = _cuma_11008_create_epub_from_archive
+        globals()['_cuma_11000_iter_archive_images'] = _cuma_11008_iter_archive_images
+        globals()['_cuma_11000_iter_epub_images'] = _cuma_11008_iter_epub_images
+        globals()['_cuma_11002_iter_archive_images_raw'] = _cuma_11008_iter_archive_images_raw
+        globals()['_cuma_11002_iter_epub_images_raw'] = _cuma_11008_iter_epub_images_raw
+        globals()['_cuma_11001_create_pdf_from_image_iter'] = _cuma_11008_create_pdf_from_image_iter
+        globals()['_cuma_11001_create_cbz_from_image_iter'] = _cuma_11008_create_cbz_from_image_iter
+        globals()['_cuma_11006_accept_create_path'] = _cuma_11008_accept_create_path
+        globals()['_tools_accept_path'] = _tools_accept_path
+        globals()['_tools_process_create_pdf'] = _tools_process_create_pdf
+        globals()['_cuma_11006_iter_archive_images'] = _cuma_11008_iter_archive_images_for_create
+        globals()['_cuma_11006_iter_source_images'] = _cuma_11008_iter_source_images_for_create
+        globals()['_cuma_11006_append_image_source'] = _cuma_11008_append_image_source
+        globals()['_cuma_11006_first_preview_image'] = _cuma_11008_first_preview_image
+        try:
+            BaseApp.create_pdf_from_images_dialog = lambda self: _tools_process_create_pdf(self, selected=False)
+        except Exception:
+            pass
+        _cuma_11008_force_version()
+    except Exception as exc:
+        _cuma_11008_log('Instalação patch 1.100.8', exc)
+
+
+_cuma_install_11008_audit_fixes()
+
+
+CUMA_11008_MANUAL_TEXT = (
+    globals().get('CUMA_11007_MANUAL_TEXT', '')
+    .replace('1.100.7', '1.100.8')
+    + '''
+
+===============================================================================
+16. CORREÇÕES DE AUDITORIA - 1.100.8
+===============================================================================
+
+Esta versão corrigiu problemas internos encontrados na auditoria de código:
+
+• CBZ/ZIP no Converter: corrigida a leitura das imagens internas.
+• CBR/RAR/7Z no Converter: corrigido o uso de diretório temporário.
+• Saídas EPUB, CBZ e PDF: agora usam arquivo temporário e substituição atômica.
+• Ferramentas: validação reforçada para aceitar apenas arquivos existentes.
+• Limpar PDF: "Sempre manter primeira página" agora força a preservação da página.
+• Release: dados locais do usuário não são incluídos no ZIP.
+• Build: o BAT copia os arquivos de documentação e chama o script de manifesto.
+• Dependências: requirements.txt usa faixas de versão.
+'''
+)
+
+CUMA_11008_README_TXT = '''CUMA - Conversor Ultimate de Mangás
+Versão: 1.100.8
+
+COMO USAR
+1. Extraia o ZIP inteiro.
+2. Abra cuma.exe.
+3. Não apague a pasta _internal.
+4. O manual completo está em manual_do_programa.txt.
+5. O resumo das mudanças recentes está em ATUALIZACOES_DESDE_1.100.2.txt.
+6. O relatório das correções está em AUDITORIA_CORRECOES_1.100.8.txt.
+
+CORREÇÕES DA 1.100.8
+- Corrigido CBZ/ZIP no Converter.
+- Corrigido CBR/RAR/7Z no Converter quando 7-Zip estiver instalado.
+- EPUB, CBZ e PDFs gerados agora usam escrita temporária/atômica.
+- Ferramentas validam arquivos existentes antes de processar.
+- O pacote não inclui .cuma_user_data/cuma_settings.json.
+- O build prepara o manifesto de atualização com SHA256/tamanho do ZIP final.
+
+DADOS DO USUÁRIO
+As configurações ficam em:
+%APPDATA%\\CUMA\\cuma_settings.json
+
+Não distribua a pasta limpos/, arquivos convertidos, CUMA.log, erro.txt, debug_completo_cuma.txt ou .cuma_user_data.
+'''
+
+
+def ensure_manual() -> Path:
+    try:
+        manual_path().write_text(CUMA_11008_MANUAL_TEXT, encoding='utf-8')
+    except Exception as exc:
+        _cuma_11008_log('Falha ao gerar manual 1.100.8', exc)
+    return manual_path()
+
+
+def _cuma_11008_write_readme() -> None:
+    try:
+        (app_dir() / 'LEIA-ME.txt').write_text(CUMA_11008_README_TXT, encoding='utf-8')
+    except Exception as exc:
+        _cuma_11008_log('Falha ao atualizar LEIA-ME 1.100.8', exc)
+
+
+def _cuma_11008_write_runtime_docs() -> None:
+    try:
+        ensure_manual()
+    except Exception:
+        pass
+    try:
+        _cuma_11008_write_readme()
+    except Exception:
+        pass
+
+
+_cuma_11008_write_runtime_docs()
+
+
+
+# =============================================================================
+# CUMA 1.100.9 - AJUSTE FINAL DA JANELA DE ATUALIZAÇÃO
+# =============================================================================
+# Mantém o rodapé com botões sempre visível, mesmo com notas de release longas.
+# A área de detalhes usa rolagem vertical fixa; quando há update, o botão Baixar
+# aparece habilitado. Quando não há pacote para baixar, permanece apenas Cancelar.
+
+CUMA_11009_UPDATE_ID = 'update_dialog_fixed_footer_11009'
+CUMA_11009_VERSION = '1.100.9'
+
+
+def _cuma_show_themed_update_dialog(app, state='none', title='Procurar atualizações',
+                                    heading=None, message=None, details=None,
+                                    download_url='', sha256='', size_bytes=0,
+                                    release_notes='') -> None:
+    try:
+        pal = _cuma_update_dialog_palette(app)
+        root = app.root
+        top = tk.Toplevel(root)
+        top.title(title or 'Procurar atualizações')
+        top.configure(bg=pal['bg'])
+        top.resizable(True, True)
+        try:
+            top.minsize(580, 360)
+        except Exception:
+            pass
+        try:
+            top.transient(root)
+            top.grab_set()
+        except Exception:
+            pass
+
+        width, height = 640, 500
+        try:
+            root.update_idletasks()
+            rx = root.winfo_rootx()
+            ry = root.winfo_rooty()
+            rw = root.winfo_width()
+            rh = root.winfo_height()
+            x = rx + max(0, (rw - width) // 2)
+            y = ry + max(0, (rh - height) // 2)
+            top.geometry(f'{width}x{height}+{x}+{y}')
+        except Exception:
+            top.geometry(f'{width}x{height}')
+
+        container = tk.Frame(top, bg=pal['surface'], bd=0,
+                             highlightthickness=1, highlightbackground=pal['border'])
+        container.pack(fill='both', expand=True, padx=1, pady=1)
+        container.grid_columnconfigure(0, weight=1)
+        container.grid_rowconfigure(2, weight=1)
+
+        accent_color = pal['accent']
+        icon_text = 'i'
+        if state == 'available':
+            accent_color = pal['accent']
+            icon_text = '↓'
+            heading = heading or 'Atualização disponível'
+        elif state == 'error':
+            accent_color = pal['danger']
+            icon_text = '!'
+            heading = heading or 'Não foi possível verificar atualizações'
+        else:
+            accent_color = pal['success']
+            icon_text = '✓'
+            heading = heading or 'Não há atualizações. Aguarde...'
+
+        top_bar = tk.Frame(container, bg=accent_color, height=4)
+        top_bar.grid(row=0, column=0, sticky='ew')
+        try:
+            top_bar.grid_propagate(False)
+        except Exception:
+            pass
+
+        header = tk.Frame(container, bg=pal['surface'], padx=24, pady=20)
+        header.grid(row=1, column=0, sticky='ew')
+        header.grid_columnconfigure(1, weight=1)
+
+        icon = tk.Canvas(header, width=54, height=54, bg=pal['surface'], highlightthickness=0)
+        icon.grid(row=0, column=0, sticky='nw', padx=(0, 16))
+        icon.create_oval(4, 4, 50, 50, fill=accent_color, outline=accent_color)
+        icon.create_text(27, 27, text=icon_text, fill=pal['button_fg'], font=('Segoe UI', 22, 'bold'))
+
+        title_box = tk.Frame(header, bg=pal['surface'])
+        title_box.grid(row=0, column=1, sticky='ew')
+        tk.Label(title_box, text=_cuma_update_safe_text(heading, 'Procurar atualizações'),
+                 bg=pal['surface'], fg=pal['fg'], font=('Segoe UI', 14, 'bold'),
+                 anchor='w', justify='left').pack(fill='x', anchor='w')
+
+        sub = 'Verificação concluída pelo GitHub Releases.'
+        if state == 'available':
+            sub = 'Existe um pacote novo publicado para baixar.'
+        elif state == 'error':
+            sub = 'Confira sua conexão ou o manifesto de atualização.'
+        tk.Label(title_box, text=sub, bg=pal['surface'], fg=pal['muted'],
+                 font=('Segoe UI', 9), anchor='w', justify='left').pack(fill='x', anchor='w', pady=(4, 0))
+
+        body = tk.Frame(container, bg=pal['surface'], padx=24, pady=0)
+        body.grid(row=2, column=0, sticky='nsew')
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        msg = _cuma_update_safe_text(message, 'Nenhuma informação adicional foi recebida.')
+        msg_label = tk.Label(body, text=msg, bg=pal['surface'], fg=pal['fg'],
+                             font=('Segoe UI', 10), anchor='nw', justify='left',
+                             wraplength=570)
+        msg_label.grid(row=0, column=0, sticky='ew', pady=(0, 12))
+
+        info_box = tk.Frame(body, bg=pal['surface2'], highlightthickness=1,
+                            highlightbackground=pal['border'])
+        info_box.grid(row=1, column=0, sticky='nsew')
+        info_box.grid_columnconfigure(0, weight=1)
+        info_box.grid_rowconfigure(0, weight=1)
+
+        text_box = tk.Text(info_box, wrap='word', bg=pal['surface2'], fg=pal['fg'],
+                           insertbackground=pal['fg'], relief='flat', bd=0,
+                           font=('Segoe UI', 9), padx=12, pady=10)
+        text_box.grid(row=0, column=0, sticky='nsew')
+
+        scroll = tk.Scrollbar(info_box, orient='vertical', command=text_box.yview,
+                              bg=pal['surface2'], activebackground=pal['drop'],
+                              troughcolor=pal['bg'], relief='flat', bd=0)
+        scroll.grid(row=0, column=1, sticky='ns')
+        text_box.configure(yscrollcommand=scroll.set)
+
+        lines = []
+        if details:
+            lines.append(_cuma_update_safe_text(details, ''))
+        if download_url:
+            lines.append('')
+            lines.append('Link de download:')
+            lines.append(str(download_url))
+        if sha256:
+            lines.append('')
+            lines.append('SHA256:')
+            lines.append(str(sha256))
+        if size_bytes:
+            lines.append('')
+            lines.append('Tamanho:')
+            lines.append(_cuma_update_human_size(size_bytes))
+        if release_notes:
+            lines.append('')
+            lines.append('Novidades:')
+            lines.append(_cuma_update_safe_text(release_notes, ''))
+
+        text_box.insert('1.0', '\n'.join(lines).strip() or 'Sem detalhes extras.')
+        text_box.configure(state='disabled')
+
+        actions = tk.Frame(container, bg=pal['surface'], padx=24, pady=(14, 18))
+        actions.grid(row=3, column=0, sticky='ew')
+        actions.grid_columnconfigure(0, weight=1)
+
+        def make_button(text_label, command, primary=False, enabled=True):
+            bg = accent_color if primary else pal['surface2']
+            fg = pal['button_fg'] if primary else pal['fg']
+            active = pal['drop'] if not primary else pal['accent']
+            btn = tk.Button(actions, text=text_label, command=command, bg=bg, fg=fg,
+                            activebackground=active, activeforeground=fg,
+                            disabledforeground=pal['muted'], relief='flat', bd=0,
+                            padx=18, pady=9,
+                            font=('Segoe UI', 9, 'bold' if primary else 'normal'),
+                            cursor='hand2' if enabled else 'arrow',
+                            state='normal' if enabled else 'disabled')
+            btn.pack(side='right', padx=(8, 0))
+            return btn
+
+        def open_download():
+            try:
+                import webbrowser
+                webbrowser.open(str(download_url))
+            except Exception as exc:
+                try:
+                    write_log(f'Falha ao abrir download: {exc}')
+                except Exception:
+                    pass
+
+        # O botão Cancelar/Fechar é sempre criado no rodapé fixo.
+        make_button('Cancelar', top.destroy, primary=False, enabled=True)
+
+        # O botão Baixar só aparece habilitado quando realmente há link de update.
+        if state == 'available' and str(download_url or '').strip():
+            make_button('Baixar', open_download, primary=True, enabled=True)
+
+        try:
+            top.bind('<Escape>', lambda _e: top.destroy())
+            top.focus_force()
+            text_box.yview_moveto(0)
+        except Exception:
+            pass
+    except Exception as exc:
+        fallback = _cuma_update_safe_text(message or exc, 'Não foi possível verificar atualizações.')
+        try:
+            messagebox.showinfo(title or 'Procurar atualizações', fallback)
+        except Exception:
+            pass
+
+
+def _cuma_11009_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11009_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11009_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11009_VERSION,
+            'date': '2026-06-23',
+            'items': [
+                'Janela de atualização com rodapé fixo.',
+                'Botão Baixar sempre visível quando há atualização disponível.',
+                'Botão Cancelar sempre visível e área de detalhes com rolagem vertical.',
+                'Build Windows passa a usar a pasta dist\\CUMA_windows e script de informações SHA256/tamanho.'
+            ],
+        }
+        if 'cuma_version_apply_globals' in globals():
+            try:
+                cuma_version_apply_globals(CUMA_11009_VERSION)
+            except Exception:
+                pass
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            try:
+                state = cuma_version_load_state()
+                events = state.get('events', [])
+                if not isinstance(events, list):
+                    events = []
+                if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11009_UPDATE_ID for e in events):
+                    events.append({
+                        'update_id': CUMA_11009_UPDATE_ID,
+                        'version': CUMA_11009_VERSION,
+                        'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                        'scale': 'pouca',
+                        'applied_at': datetime.now().isoformat(timespec='seconds'),
+                        'description': 'Correção do layout da janela de atualizações e ajustes no build Windows.',
+                    })
+                state['events'] = events[-100:]
+                state['current_version'] = CUMA_11009_VERSION
+                state['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+                cuma_version_save_state(state)
+                if '_cuma_version_write_public_files' in globals():
+                    _cuma_version_write_public_files(state)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_cuma_11009_force_version()
+
+
+CUMA_11009_MANUAL_TEXT = (
+    globals().get('CUMA_11008_MANUAL_TEXT', '')
+    .replace('1.100.8', '1.100.9')
+    + """
+
+===============================================================================
+17. AJUSTE DO ATUALIZADOR - 1.100.9
+===============================================================================
+
+Esta atualização corrige somente o layout da janela "Procurar atualizações".
+
+- O rodapé da janela agora fica fixo.
+- O botão Cancelar aparece sempre.
+- Quando há atualização disponível e há link de download, o botão Baixar aparece habilitado.
+- A caixa de detalhes possui rolagem vertical para notas grandes, SHA256, tamanho e link.
+- O build Windows passa a gerar a pasta dist\\CUMA_windows.
+- O arquivo gerar_info_release.bat calcula SHA256 e tamanho do CUMA_windows.zip.
+"""
+)
+
+CUMA_11009_README_TXT = """CUMA - Conversor Ultimate de Mangás
+Versão: 1.100.9
+
+COMO USAR
+1. Extraia o ZIP inteiro.
+2. Abra cuma.exe.
+3. Não apague a pasta _internal.
+4. O manual completo está em manual_do_programa.txt.
+
+CORREÇÃO DA 1.100.9
+- Janela de atualização com rodapé fixo.
+- Botão Cancelar sempre visível.
+- Botão Baixar aparece quando há atualização disponível.
+- Área de detalhes com rolagem vertical.
+- Build Windows ajustado para pasta dist\\CUMA_windows.
+- gerar_info_release.bat calcula SHA256 e tamanho do CUMA_windows.zip.
+"""
+
+
+def ensure_manual() -> Path:
+    try:
+        manual_path().write_text(CUMA_11009_MANUAL_TEXT, encoding='utf-8')
+    except Exception:
+        pass
+    return manual_path()
+
+
+def _cuma_11009_write_runtime_docs() -> None:
+    try:
+        ensure_manual()
+    except Exception:
+        pass
+    try:
+        (app_dir() / 'LEIA-ME.txt').write_text(CUMA_11009_README_TXT, encoding='utf-8')
+    except Exception:
+        pass
+
+
+_cuma_11009_write_runtime_docs()
+
+
+
+# =============================================================================
+# CUMA 1.100.10 - CORREÇÃO DEFINITIVA DO RODAPÉ DO ATUALIZADOR
+# =============================================================================
+# Corrige o caso em que a caixa de detalhes crescia e escondia os botões.
+# O rodapé agora é reservado antes da área expansível: Cancelar sempre aparece;
+# Baixar aparece apenas quando há atualização disponível com link de download.
+
+CUMA_11010_UPDATE_ID = 'update_dialog_footer_visible_11010'
+CUMA_11010_VERSION = '1.100.10'
+
+
+def _cuma_show_themed_update_dialog(app, state='none', title='Procurar atualizações',
+                                    heading=None, message=None, details=None,
+                                    download_url='', sha256='', size_bytes=0,
+                                    release_notes='') -> None:
+    try:
+        pal = _cuma_update_dialog_palette(app)
+        root = app.root
+        top = tk.Toplevel(root)
+        top.title(title or 'Procurar atualizações')
+        top.configure(bg=pal['bg'])
+        top.resizable(True, True)
+        try:
+            top.minsize(600, 420)
+        except Exception:
+            pass
+        try:
+            top.transient(root)
+            top.grab_set()
+        except Exception:
+            pass
+
+        width, height = 660, 520
+        try:
+            root.update_idletasks()
+            rx = root.winfo_rootx()
+            ry = root.winfo_rooty()
+            rw = root.winfo_width()
+            rh = root.winfo_height()
+            x = rx + max(0, (rw - width) // 2)
+            y = ry + max(0, (rh - height) // 2)
+            top.geometry(f'{width}x{height}+{x}+{y}')
+        except Exception:
+            top.geometry(f'{width}x{height}')
+
+        container = tk.Frame(top, bg=pal['surface'], bd=0,
+                             highlightthickness=1, highlightbackground=pal['border'])
+        container.pack(fill='both', expand=True, padx=1, pady=1)
+
+        accent_color = pal['accent']
+        icon_text = 'i'
+        if state == 'available':
+            accent_color = pal['accent']
+            icon_text = '↓'
+            heading = heading or 'Atualização disponível'
+        elif state == 'error':
+            accent_color = pal['danger']
+            icon_text = '!'
+            heading = heading or 'Não foi possível verificar atualizações'
+        else:
+            accent_color = pal['success']
+            icon_text = '✓'
+            heading = heading or 'Não há atualizações. Aguarde...'
+
+        top_bar = tk.Frame(container, bg=accent_color, height=4)
+        top_bar.pack(side='top', fill='x')
+        try:
+            top_bar.pack_propagate(False)
+        except Exception:
+            pass
+
+        header = tk.Frame(container, bg=pal['surface'], padx=24, pady=(20, 14))
+        header.pack(side='top', fill='x')
+
+        icon = tk.Canvas(header, width=54, height=54, bg=pal['surface'], highlightthickness=0)
+        icon.pack(side='left', padx=(0, 16), anchor='n')
+        icon.create_oval(4, 4, 50, 50, fill=accent_color, outline=accent_color)
+        icon.create_text(27, 27, text=icon_text, fill=pal['button_fg'], font=('Segoe UI', 22, 'bold'))
+
+        title_box = tk.Frame(header, bg=pal['surface'])
+        title_box.pack(side='left', fill='x', expand=True)
+        tk.Label(title_box, text=_cuma_update_safe_text(heading, 'Procurar atualizações'),
+                 bg=pal['surface'], fg=pal['fg'], font=('Segoe UI', 14, 'bold'),
+                 anchor='w', justify='left').pack(fill='x', anchor='w')
+
+        sub = 'Verificação concluída pelo GitHub Releases.'
+        if state == 'available':
+            sub = 'Existe um pacote novo publicado para baixar.'
+        elif state == 'error':
+            sub = 'Confira sua conexão ou o manifesto de atualização.'
+        tk.Label(title_box, text=sub, bg=pal['surface'], fg=pal['muted'],
+                 font=('Segoe UI', 9), anchor='w', justify='left').pack(fill='x', anchor='w', pady=(4, 0))
+
+        # O rodapé é empacotado ANTES do corpo expansível para reservar espaço.
+        actions = tk.Frame(container, bg=pal['surface'], padx=24, pady=(10, 16))
+        actions.pack(side='bottom', fill='x')
+
+        def make_button(text_label, command, primary=False, enabled=True):
+            bg = accent_color if primary else pal['surface2']
+            fg = pal['button_fg'] if primary else pal['fg']
+            active = pal['drop'] if not primary else pal['accent']
+            btn = tk.Button(actions, text=text_label, command=command, bg=bg, fg=fg,
+                            activebackground=active, activeforeground=fg,
+                            disabledforeground=pal['muted'], relief='flat', bd=0,
+                            padx=20, pady=9,
+                            font=('Segoe UI', 9, 'bold' if primary else 'normal'),
+                            cursor='hand2' if enabled else 'arrow',
+                            state='normal' if enabled else 'disabled')
+            btn.pack(side='right', padx=(8, 0))
+            return btn
+
+        def open_download():
+            try:
+                import webbrowser
+                webbrowser.open(str(download_url))
+            except Exception as exc:
+                try:
+                    write_log(f'Falha ao abrir download: {exc}')
+                except Exception:
+                    pass
+
+        # Cancelar sempre visível.
+        make_button('Cancelar', top.destroy, primary=False, enabled=True)
+
+        # Baixar aparece só quando existe atualização e existe link.
+        if state == 'available' and str(download_url or '').strip():
+            make_button('Baixar', open_download, primary=True, enabled=True)
+
+        body = tk.Frame(container, bg=pal['surface'], padx=24, pady=(0, 0))
+        body.pack(side='top', fill='both', expand=True)
+
+        msg = _cuma_update_safe_text(message, 'Nenhuma informação adicional foi recebida.')
+        msg_label = tk.Label(body, text=msg, bg=pal['surface'], fg=pal['fg'],
+                             font=('Segoe UI', 10), anchor='nw', justify='left',
+                             wraplength=590)
+        msg_label.pack(side='top', fill='x', anchor='w', pady=(0, 12))
+
+        info_box = tk.Frame(body, bg=pal['surface2'], highlightthickness=1,
+                            highlightbackground=pal['border'])
+        info_box.pack(side='top', fill='both', expand=True)
+
+        text_box = tk.Text(info_box, height=8, wrap='word', bg=pal['surface2'], fg=pal['fg'],
+                           insertbackground=pal['fg'], relief='flat', bd=0,
+                           font=('Segoe UI', 9), padx=12, pady=10)
+        text_box.pack(side='left', fill='both', expand=True)
+
+        scroll = tk.Scrollbar(info_box, orient='vertical', command=text_box.yview,
+                              bg=pal['surface2'], activebackground=pal['drop'],
+                              troughcolor=pal['bg'], relief='flat', bd=0)
+        scroll.pack(side='right', fill='y')
+        text_box.configure(yscrollcommand=scroll.set)
+
+        lines = []
+        if details:
+            lines.append(_cuma_update_safe_text(details, ''))
+        if download_url:
+            lines.append('')
+            lines.append('Link de download:')
+            lines.append(str(download_url))
+        if sha256:
+            lines.append('')
+            lines.append('SHA256:')
+            lines.append(str(sha256))
+        if size_bytes:
+            lines.append('')
+            lines.append('Tamanho:')
+            lines.append(_cuma_update_human_size(size_bytes))
+        if release_notes:
+            lines.append('')
+            lines.append('Novidades:')
+            lines.append(_cuma_update_safe_text(release_notes, ''))
+
+        text_box.insert('1.0', '\n'.join(lines).strip() or 'Sem detalhes extras.')
+        text_box.configure(state='disabled')
+
+        try:
+            top.bind('<Escape>', lambda _e: top.destroy())
+            top.focus_force()
+            text_box.yview_moveto(0)
+            actions.lift()
+        except Exception:
+            pass
+    except Exception as exc:
+        fallback = _cuma_update_safe_text(message or exc, 'Não foi possível verificar atualizações.')
+        try:
+            messagebox.showinfo(title or 'Procurar atualizações', fallback)
+        except Exception:
+            pass
+
+
+def _cuma_11010_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11010_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11010_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11010_VERSION,
+            'date': '2026-06-23',
+            'items': [
+                'Corrige o rodapé da janela de atualizações para nunca ficar escondido.',
+                'Botão Cancelar fica sempre visível.',
+                'Botão Baixar aparece quando há atualização disponível com link.',
+                'Caixa de detalhes mantém barra de rolagem vertical.'
+            ],
+        }
+        if 'cuma_version_apply_globals' in globals():
+            try:
+                cuma_version_apply_globals(CUMA_11010_VERSION)
+            except Exception:
+                pass
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            try:
+                state_data = cuma_version_load_state()
+                events = state_data.get('events', [])
+                if not isinstance(events, list):
+                    events = []
+                if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11010_UPDATE_ID for e in events):
+                    events.append({
+                        'update_id': CUMA_11010_UPDATE_ID,
+                        'version': CUMA_11010_VERSION,
+                        'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                        'scale': 'pouca',
+                        'applied_at': datetime.now().isoformat(timespec='seconds'),
+                        'description': 'Correção definitiva do rodapé da janela de atualizações.',
+                    })
+                state_data['events'] = events[-100:]
+                state_data['current_version'] = CUMA_11010_VERSION
+                state_data['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+                cuma_version_save_state(state_data)
+                if '_cuma_version_write_public_files' in globals():
+                    _cuma_version_write_public_files(state_data)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_cuma_11010_force_version()
+
+
+CUMA_11010_MANUAL_TEXT = (
+    globals().get('CUMA_11009_MANUAL_TEXT', globals().get('CUMA_11008_MANUAL_TEXT', ''))
+    .replace('1.100.9', '1.100.10')
+    + """
+
+===============================================================================
+18. CORREÇÃO DEFINITIVA DO ATUALIZADOR - 1.100.10
+===============================================================================
+
+Esta atualização corrige a janela "Procurar atualizações" para que o rodapé nunca
+fique escondido pela caixa de detalhes.
+
+- O botão Cancelar aparece sempre no rodapé.
+- Quando há atualização disponível e link de download, o botão Baixar aparece habilitado.
+- Quando não há atualização, fica apenas Cancelar.
+- A caixa de detalhes possui barra de rolagem vertical.
+"""
+)
+
+CUMA_11010_README_TXT = """CUMA - Conversor Ultimate de Mangás
+Versão: 1.100.10
+
+COMO USAR
+1. Extraia o ZIP inteiro.
+2. Abra cuma.exe.
+3. Não apague a pasta _internal.
+4. O manual completo está em manual_do_programa.txt.
+
+CORREÇÃO DA 1.100.10
+- Rodapé da janela de atualização corrigido para ficar sempre visível.
+- Botão Cancelar sempre visível.
+- Botão Baixar aparece quando há atualização disponível.
+- Caixa de detalhes com barra de rolagem vertical.
+"""
+
+
+def ensure_manual() -> Path:
+    try:
+        manual_path().write_text(CUMA_11010_MANUAL_TEXT, encoding='utf-8')
+    except Exception:
+        pass
+    return manual_path()
+
+
+def _cuma_11010_write_runtime_docs() -> None:
+    try:
+        ensure_manual()
+    except Exception:
+        pass
+    try:
+        (app_dir() / 'LEIA-ME.txt').write_text(CUMA_11010_README_TXT, encoding='utf-8')
+    except Exception:
+        pass
+
+
+_cuma_11010_write_runtime_docs()
+
+
+
+
+# =============================================================================
+# CUMA 1.100.11 - ATUALIZADOR AUTOMÁTICO VIA GITHUB RELEASES
+# =============================================================================
+# Mantém a opção manual e adiciona a opção automática:
+# - Atualizar agora: baixa o ZIP, valida SHA256, inicia cuma_updater.exe temporário,
+#   fecha o CUMA e deixa o atualizador substituir os arquivos.
+# - Baixar manualmente: abre o link da release para o usuário instalar quando quiser.
+
+CUMA_11011_UPDATE_ID = 'github_auto_updater_external_11011'
+CUMA_11011_VERSION = '1.100.11'
+
+
+def _cuma_auto_update_install_dir() -> Path:
+    try:
+        if getattr(sys, 'frozen', False):
+            return Path(sys.executable).resolve().parent
+    except Exception:
+        pass
+    try:
+        return Path(__file__).resolve().parent
+    except Exception:
+        return app_dir()
+
+
+def _cuma_auto_update_valid_sha256(value: str) -> str:
+    try:
+        text = str(value or '').strip().upper()
+    except Exception:
+        return ''
+    if not text or 'COLOQUE' in text or 'PLACEHOLDER' in text:
+        return ''
+    text = ''.join(ch for ch in text if ch in '0123456789ABCDEF')
+    return text if len(text) == 64 else ''
+
+
+def _cuma_auto_update_verify_sha_enabled() -> bool:
+    try:
+        settings = cuma_settings_load()
+        updates = settings.get('updates', {}) if isinstance(settings, dict) else {}
+        if isinstance(updates, dict):
+            return bool(updates.get('verify_sha256', True))
+    except Exception:
+        pass
+    return True
+
+
+def _cuma_auto_update_sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest().upper()
+
+
+def _cuma_auto_update_download_file(url: str, dest: Path, expected_size: int = 0,
+                                    progress_cb: Optional[Callable[[str], None]] = None) -> None:
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(
+        str(url),
+        headers={'User-Agent': 'CUMA-Auto-Updater/1.100.11'}
+    )
+    downloaded = 0
+    last_report = 0.0
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        total = expected_size
+        try:
+            header_size = int(resp.headers.get('Content-Length') or 0)
+            if not total and header_size:
+                total = header_size
+        except Exception:
+            pass
+
+        with dest.open('wb') as f:
+            while True:
+                chunk = resp.read(1024 * 512)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                now = time.time()
+                if progress_cb and (now - last_report > 0.35):
+                    last_report = now
+                    if total:
+                        pct = min(100, int(downloaded * 100 / max(1, total)))
+                        progress_cb(f'Baixando pacote... {pct}% ({_cuma_update_human_size(downloaded)} de {_cuma_update_human_size(total)})')
+                    else:
+                        progress_cb(f'Baixando pacote... {_cuma_update_human_size(downloaded)}')
+
+    if expected_size and dest.stat().st_size != int(expected_size):
+        raise RuntimeError(
+            f'Tamanho do ZIP diferente do manifesto. Esperado: {expected_size}; recebido: {dest.stat().st_size}.'
+        )
+
+
+def _cuma_auto_update_prepare_updater_command(install_dir: Path, work_dir: Path, request_file: Path) -> list[str]:
+    # O updater é copiado para uma pasta temporária antes de rodar.
+    # Assim ele consegue substituir também o cuma_updater.exe da pasta instalada.
+    updater_exe = install_dir / 'cuma_updater.exe'
+    if updater_exe.exists():
+        temp_updater = work_dir / 'cuma_updater.exe'
+        shutil.copy2(updater_exe, temp_updater)
+        return [str(temp_updater), '--request', str(request_file)]
+
+    # Caminho útil para testes executando pelo Python, antes de compilar.
+    try:
+        updater_py = Path(__file__).resolve().with_name('cuma_updater.py')
+        if updater_py.exists():
+            return [sys.executable, str(updater_py), '--request', str(request_file)]
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        'cuma_updater.exe não foi encontrado na pasta do programa. '
+        'Compile novamente usando criar_exe_windows_e_zip.bat para incluir o atualizador externo.'
+    )
+
+
+def _cuma_auto_update_launch(payload: dict, progress_cb: Optional[Callable[[str], None]] = None) -> None:
+    download_url = str(payload.get('download_url') or '').strip()
+    if not download_url:
+        raise RuntimeError('O manifesto não informou um link de download para a atualização.')
+
+    if os.name != 'nt':
+        raise RuntimeError('A atualização automática foi preparada para o pacote Windows do CUMA.')
+
+    install_dir = _cuma_auto_update_install_dir()
+    if not (install_dir / 'cuma.exe').exists() and getattr(sys, 'frozen', False):
+        raise RuntimeError(f'Não encontrei cuma.exe na pasta de instalação: {install_dir}')
+
+    expected_size = 0
+    try:
+        expected_size = int(payload.get('size_bytes', 0) or 0)
+    except Exception:
+        expected_size = 0
+
+    expected_sha = _cuma_auto_update_valid_sha256(payload.get('sha256', ''))
+    if _cuma_auto_update_verify_sha_enabled() and not expected_sha:
+        raise RuntimeError(
+            'O manifesto não contém um SHA256 válido. '
+            'Por segurança, a atualização automática foi bloqueada. '
+            'Use "Baixar manualmente" ou publique a release gerando o stable.json pelo script.'
+        )
+
+    temp_base = Path(tempfile.gettempdir()) / 'CUMA_updates'
+    temp_base.mkdir(parents=True, exist_ok=True)
+    work_dir = temp_base / f'update_{datetime.now().strftime("%Y%m%d_%H%M%S")}_{uuid.uuid4().hex[:8]}'
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_path = work_dir / 'CUMA_windows.zip'
+    if progress_cb:
+        progress_cb('Baixando pacote de atualização...')
+    _cuma_auto_update_download_file(download_url, archive_path, expected_size, progress_cb)
+
+    if expected_sha:
+        if progress_cb:
+            progress_cb('Verificando SHA256 do pacote...')
+        got_sha = _cuma_auto_update_sha256_file(archive_path)
+        if got_sha != expected_sha:
+            raise RuntimeError(f'SHA256 inválido. Esperado {expected_sha}, recebido {got_sha}.')
+
+    main_exe_name = 'cuma.exe'
+    try:
+        if getattr(sys, 'frozen', False):
+            main_exe_name = Path(sys.executable).name
+    except Exception:
+        pass
+
+    request = {
+        'schema': 'CUMA_UPDATE_REQUEST',
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'install_dir': str(install_dir),
+        'archive_path': str(archive_path),
+        'main_exe_name': main_exe_name,
+        'main_pid': os.getpid(),
+        'latest_version': str(payload.get('latest_version') or '').strip(),
+        'current_version': str(payload.get('current_version') or '').strip(),
+        'expected_sha256': expected_sha,
+        'expected_size_bytes': expected_size,
+        'download_url': download_url,
+        'manifest_url': str(payload.get('manifest_url') or '').strip(),
+        'keep_backup': True,
+    }
+    request_file = work_dir / 'update_request.json'
+    request_file.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    cmd = _cuma_auto_update_prepare_updater_command(install_dir, work_dir, request_file)
+    flags = 0
+    if os.name == 'nt':
+        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    if progress_cb:
+        progress_cb('Atualizador iniciado. O CUMA será fechado para instalar a nova versão...')
+    subprocess.Popen(cmd, cwd=str(work_dir), close_fds=True, creationflags=flags)
+
+
+def _cuma_force_close_for_auto_update(app) -> None:
+    try:
+        root = app.root
+    except Exception:
+        root = None
+
+    def hard_exit():
+        try:
+            os._exit(0)
+        except Exception:
+            pass
+
+    try:
+        if root is not None:
+            root.destroy()
+    except Exception:
+        pass
+
+    try:
+        if root is not None:
+            root.after(1200, hard_exit)
+    except Exception:
+        # Se o loop Tk já terminou, garante encerramento mesmo assim.
+        try:
+            threading.Timer(1.2, hard_exit).start()
+        except Exception:
+            pass
+
+
+def _cuma_show_themed_update_dialog(app, state='none', title='Procurar atualizações',
+                                    heading=None, message=None, details=None,
+                                    download_url='', sha256='', size_bytes=0,
+                                    release_notes='', latest_version='',
+                                    current_version='', manifest_url='', channel='',
+                                    mandatory=False, **_extra) -> None:
+    try:
+        pal = _cuma_update_dialog_palette(app)
+        root = app.root
+        top = tk.Toplevel(root)
+        top.title(title or 'Procurar atualizações')
+        top.configure(bg=pal['bg'])
+        top.resizable(True, True)
+        try:
+            top.minsize(620, 450)
+        except Exception:
+            pass
+        try:
+            top.transient(root)
+            top.grab_set()
+        except Exception:
+            pass
+
+        width, height = 700, 560
+        try:
+            root.update_idletasks()
+            rx = root.winfo_rootx()
+            ry = root.winfo_rooty()
+            rw = root.winfo_width()
+            rh = root.winfo_height()
+            x = rx + max(0, (rw - width) // 2)
+            y = ry + max(0, (rh - height) // 2)
+            top.geometry(f'{width}x{height}+{x}+{y}')
+        except Exception:
+            top.geometry(f'{width}x{height}')
+
+        container = tk.Frame(top, bg=pal['surface'], bd=0,
+                             highlightthickness=1, highlightbackground=pal['border'])
+        container.pack(fill='both', expand=True, padx=1, pady=1)
+
+        accent_color = pal['accent']
+        icon_text = 'i'
+        if state == 'available':
+            accent_color = pal['accent']
+            icon_text = '↓'
+            heading = heading or 'Atualização disponível'
+        elif state == 'error':
+            accent_color = pal['danger']
+            icon_text = '!'
+            heading = heading or 'Não foi possível verificar atualizações'
+        else:
+            accent_color = pal['success']
+            icon_text = '✓'
+            heading = heading or 'Não há atualizações. Aguarde...'
+
+        top_bar = tk.Frame(container, bg=accent_color, height=4)
+        top_bar.pack(side='top', fill='x')
+        try:
+            top_bar.pack_propagate(False)
+        except Exception:
+            pass
+
+        header = tk.Frame(container, bg=pal['surface'], padx=24, pady=(20, 14))
+        header.pack(side='top', fill='x')
+
+        icon = tk.Canvas(header, width=54, height=54, bg=pal['surface'], highlightthickness=0)
+        icon.pack(side='left', padx=(0, 16), anchor='n')
+        icon.create_oval(4, 4, 50, 50, fill=accent_color, outline=accent_color)
+        icon.create_text(27, 27, text=icon_text, fill=pal['button_fg'], font=('Segoe UI', 22, 'bold'))
+
+        title_box = tk.Frame(header, bg=pal['surface'])
+        title_box.pack(side='left', fill='x', expand=True)
+        tk.Label(title_box, text=_cuma_update_safe_text(heading, 'Procurar atualizações'),
+                 bg=pal['surface'], fg=pal['fg'], font=('Segoe UI', 14, 'bold'),
+                 anchor='w', justify='left').pack(fill='x', anchor='w')
+
+        sub = 'Verificação concluída pelo GitHub Releases.'
+        if state == 'available':
+            sub = 'Você pode atualizar automaticamente ou baixar o pacote manualmente.'
+        elif state == 'error':
+            sub = 'Confira sua conexão ou o manifesto de atualização.'
+        tk.Label(title_box, text=sub, bg=pal['surface'], fg=pal['muted'],
+                 font=('Segoe UI', 9), anchor='w', justify='left').pack(fill='x', anchor='w', pady=(4, 0))
+
+        actions = tk.Frame(container, bg=pal['surface'], padx=24, pady=(10, 16))
+        actions.pack(side='bottom', fill='x')
+
+        status_var = tk.StringVar(value='')
+        status_label = tk.Label(container, textvariable=status_var, bg=pal['surface'], fg=pal['muted'],
+                                font=('Segoe UI', 9), anchor='w', justify='left')
+        status_label.pack(side='bottom', fill='x', padx=24, pady=(0, 2))
+
+        buttons = []
+
+        def make_button(text_label, command, primary=False, enabled=True):
+            bg = accent_color if primary else pal['surface2']
+            fg = pal['button_fg'] if primary else pal['fg']
+            active = pal['drop'] if not primary else pal['accent']
+            btn = tk.Button(actions, text=text_label, command=command, bg=bg, fg=fg,
+                            activebackground=active, activeforeground=fg,
+                            disabledforeground=pal['muted'], relief='flat', bd=0,
+                            padx=18, pady=9,
+                            font=('Segoe UI', 9, 'bold' if primary else 'normal'),
+                            cursor='hand2' if enabled else 'arrow',
+                            state='normal' if enabled else 'disabled')
+            btn.pack(side='right', padx=(8, 0))
+            buttons.append(btn)
+            return btn
+
+        def open_download():
+            try:
+                import webbrowser
+                webbrowser.open(str(download_url))
+                status_var.set('Download manual aberto no navegador. Você decide quando instalar.')
+            except Exception as exc:
+                try:
+                    write_log(f'Falha ao abrir download manual: {exc}')
+                except Exception:
+                    pass
+                try:
+                    messagebox.showerror('Baixar manualmente', _cuma_update_safe_text(exc, 'Falha ao abrir o link.'))
+                except Exception:
+                    pass
+
+        def set_status(text_value: str) -> None:
+            try:
+                root.after(0, lambda value=str(text_value): status_var.set(value))
+            except Exception:
+                try:
+                    status_var.set(str(text_value))
+                except Exception:
+                    pass
+
+        def start_auto_update():
+            payload = {
+                'download_url': str(download_url or '').strip(),
+                'sha256': str(sha256 or '').strip(),
+                'size_bytes': int(size_bytes or 0) if str(size_bytes or '').strip() else 0,
+                'latest_version': str(latest_version or '').strip(),
+                'current_version': str(current_version or '').strip(),
+                'manifest_url': str(manifest_url or '').strip(),
+                'channel': str(channel or '').strip(),
+            }
+            try:
+                for b in buttons:
+                    b.configure(state='disabled', cursor='arrow')
+                status_var.set('Preparando atualização automática...')
+            except Exception:
+                pass
+
+            def worker():
+                try:
+                    _cuma_auto_update_launch(payload, set_status)
+                    try:
+                        root.after(350, lambda: _cuma_force_close_for_auto_update(app))
+                    except Exception:
+                        _cuma_force_close_for_auto_update(app)
+                except Exception as exc:
+                    try:
+                        _cuma_patch_log_exception('Atualização automática GitHub', exc)
+                    except Exception:
+                        try:
+                            write_log(f'Atualização automática GitHub: {exc}')
+                        except Exception:
+                            pass
+
+                    def fail():
+                        try:
+                            for b in buttons:
+                                b.configure(state='normal', cursor='hand2')
+                            status_var.set('Atualização automática não concluída. Use o download manual se preferir.')
+                            messagebox.showerror(
+                                'Atualização automática',
+                                _cuma_update_safe_text(exc, 'Não foi possível atualizar automaticamente.')
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        root.after(0, fail)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=worker, daemon=True, name='CUMA-Auto-Updater-Launcher').start()
+
+        cancel_btn = make_button('Cancelar', top.destroy, primary=False, enabled=True)
+
+        if state == 'available' and str(download_url or '').strip():
+            manual_btn = make_button('Baixar manualmente', open_download, primary=False, enabled=True)
+            auto_enabled = True
+            if _cuma_auto_update_verify_sha_enabled() and not _cuma_auto_update_valid_sha256(sha256):
+                auto_enabled = False
+                status_var.set('Atualização automática bloqueada: o SHA256 do stable.json ainda não é válido.')
+            auto_btn = make_button('Atualizar agora', start_auto_update, primary=True, enabled=auto_enabled)
+        elif sha256:
+            make_button('Copiar SHA256', lambda: _cuma_copy_to_clipboard(root, sha256), primary=False, enabled=True)
+
+        body = tk.Frame(container, bg=pal['surface'], padx=24, pady=(0, 0))
+        body.pack(side='top', fill='both', expand=True)
+
+        msg = _cuma_update_safe_text(message, 'Nenhuma informação adicional foi recebida.')
+        msg_label = tk.Label(body, text=msg, bg=pal['surface'], fg=pal['fg'],
+                             font=('Segoe UI', 10), anchor='nw', justify='left',
+                             wraplength=640)
+        msg_label.pack(side='top', fill='x', anchor='w', pady=(0, 12))
+
+        info_box = tk.Frame(body, bg=pal['surface2'], highlightthickness=1,
+                            highlightbackground=pal['border'])
+        info_box.pack(side='top', fill='both', expand=True)
+
+        text_box = tk.Text(info_box, height=8, wrap='word', bg=pal['surface2'], fg=pal['fg'],
+                           insertbackground=pal['fg'], relief='flat', bd=0,
+                           font=('Segoe UI', 9), padx=12, pady=10)
+        text_box.pack(side='left', fill='both', expand=True)
+
+        scroll = tk.Scrollbar(info_box, orient='vertical', command=text_box.yview,
+                              bg=pal['surface2'], activebackground=pal['drop'],
+                              troughcolor=pal['bg'], relief='flat', bd=0)
+        scroll.pack(side='right', fill='y')
+        text_box.configure(yscrollcommand=scroll.set)
+
+        lines = []
+        if details:
+            lines.append(_cuma_update_safe_text(details, ''))
+        if download_url:
+            lines.append('')
+            lines.append('Link de download:')
+            lines.append(str(download_url))
+        if sha256:
+            lines.append('')
+            lines.append('SHA256:')
+            lines.append(str(sha256))
+        if size_bytes:
+            lines.append('')
+            lines.append('Tamanho:')
+            lines.append(_cuma_update_human_size(size_bytes))
+        if release_notes:
+            lines.append('')
+            lines.append('Novidades:')
+            lines.append(_cuma_update_safe_text(release_notes, ''))
+
+        text_box.insert('1.0', '\n'.join(lines).strip() or 'Sem detalhes extras.')
+        text_box.configure(state='disabled')
+
+        try:
+            top.bind('<Escape>', lambda _e: top.destroy())
+            top.focus_force()
+            text_box.yview_moveto(0)
+            actions.lift()
+        except Exception:
+            pass
+    except Exception as exc:
+        fallback = _cuma_update_safe_text(message or exc, 'Não foi possível verificar atualizações.')
+        try:
+            messagebox.showinfo(title or 'Procurar atualizações', fallback)
+        except Exception:
+            pass
+
+
+def _cuma_check_updates_button_async_11011(self):
+    if getattr(self, '_update_manifest_check_running', False):
+        return
+    self._update_manifest_check_running = True
+    btn = getattr(self, 'update_btn', None)
+    try:
+        if btn is not None:
+            btn.configure(state='disabled', text='Verificando...')
+    except Exception:
+        pass
+
+    def finish(payload: dict) -> None:
+        self._update_manifest_check_running = False
+        try:
+            if btn is not None:
+                btn.configure(state='normal', text='Procurar atualizações')
+        except Exception:
+            pass
+        try:
+            _cuma_show_themed_update_dialog(self, **payload)
+        except Exception as exc:
+            safe_message = _cuma_update_safe_text(payload.get('message') or exc, 'Não foi possível verificar atualizações.')
+            try:
+                messagebox.showinfo(payload.get('title', 'Procurar atualizações'), safe_message)
+            except Exception:
+                pass
+
+    def worker():
+        try:
+            _cuma_ensure_update_settings_defaults()
+            manifest_url = _cuma_update_manifest_url_from_settings()
+            import urllib.request
+            req = urllib.request.Request(
+                manifest_url,
+                headers={'User-Agent': 'CUMA-Update-Checker/1.100.11'}
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                remote = json.loads(resp.read().decode('utf-8'))
+
+            if str(remote.get('app_id', 'cuma')).lower() != 'cuma':
+                raise ValueError('O manifesto remoto não parece ser do CUMA.')
+
+            latest = str(remote.get('version', '') or '').strip()
+            current = str(globals().get('APP_DISPLAY_VERSION', '1.100.11') or '1.100.11').strip()
+            download_url = str(remote.get('download_url', '') or '').strip()
+            remote_sha = str(remote.get('sha256', '') or '').strip()
+            try:
+                remote_size = int(remote.get('size_bytes', 0) or 0)
+            except Exception:
+                remote_size = 0
+            notes = remote.get('release_notes', [])
+            if isinstance(notes, list):
+                notes_text = '\n'.join(f'• {str(item)}' for item in notes[:12])
+            else:
+                notes_text = str(notes or '')
+
+            try:
+                settings = cuma_settings_load()
+                settings.setdefault('updates', {})
+                if isinstance(settings.get('updates'), dict):
+                    settings['updates']['last_checked_at'] = datetime.now().isoformat(timespec='seconds')
+                    settings['updates']['last_available_version'] = latest
+                    settings['updates']['last_manifest_url'] = manifest_url
+                cuma_settings_save(settings)
+            except Exception:
+                pass
+
+            latest_tuple = _cuma_update_version_tuple(latest)
+            current_tuple = _cuma_update_version_tuple(current)
+            channel = str(remote.get('channel', 'stable') or 'stable')
+            mandatory = bool(remote.get('mandatory', False))
+
+            if latest and latest_tuple > current_tuple:
+                payload = {
+                    'state': 'available',
+                    'title': 'Atualização disponível',
+                    'heading': f'CUMA {latest} está disponível',
+                    'message': (
+                        f'Você está usando a versão {current}. '
+                        f'Escolha "Atualizar agora" para baixar, fechar o CUMA e instalar automaticamente, '
+                        f'ou "Baixar manualmente" para instalar depois.'
+                    ),
+                    'details': f'Versão instalada: {current}\nVersão no GitHub: {latest}\nCanal: {channel}\nManifesto: {manifest_url}',
+                    'download_url': download_url or CUMA_DEFAULT_UPDATE_DOWNLOAD_URL,
+                    'sha256': remote_sha,
+                    'size_bytes': remote_size,
+                    'release_notes': notes_text,
+                    'latest_version': latest,
+                    'current_version': current,
+                    'manifest_url': manifest_url,
+                    'channel': channel,
+                    'mandatory': mandatory,
+                }
+            else:
+                payload = {
+                    'state': 'none',
+                    'title': 'Procurar atualizações',
+                    'heading': 'Não há atualizações. Aguarde...',
+                    'message': 'Você já está usando a versão mais recente disponível para este canal.',
+                    'details': f'Versão instalada: {current}\nVersão no GitHub: {latest or "não informada"}\nCanal: {channel}\nManifesto: {manifest_url}',
+                    'download_url': '',
+                    'sha256': remote_sha,
+                    'size_bytes': remote_size,
+                    'release_notes': notes_text,
+                    'latest_version': latest,
+                    'current_version': current,
+                    'manifest_url': manifest_url,
+                    'channel': channel,
+                    'mandatory': mandatory,
+                }
+
+            self.root.after(0, lambda payload=payload: finish(payload))
+        except Exception as exc:
+            try:
+                _cuma_patch_log_exception('Verificação de atualizações GitHub', exc)
+            except Exception:
+                try:
+                    write_log(f'Verificação de atualizações GitHub: {exc}')
+                except Exception:
+                    pass
+            payload = {
+                'state': 'error',
+                'title': 'Procurar atualizações',
+                'heading': 'Não foi possível verificar atualizações',
+                'message': _cuma_update_safe_text(friendly_error(exc), 'Não foi possível verificar atualizações.'),
+                'details': f'Erro técnico: {type(exc).__name__}: {exc}',
+            }
+            self.root.after(0, lambda payload=payload: finish(payload))
+
+    threading.Thread(target=worker, daemon=True, name='CUMA-Update-Checker').start()
+
+
+def _cuma_11011_force_version() -> None:
+    try:
+        globals()['APP_DISPLAY_VERSION'] = CUMA_11011_VERSION
+        globals()['APP_VERSION'] = f'{CUMA_11011_VERSION} CUMA'
+        globals()['CHANGELOG_LATEST'] = {
+            'version': CUMA_11011_VERSION,
+            'date': '2026-06-24',
+            'items': [
+                'Adiciona atualização automática via GitHub Releases.',
+                'Mantém a opção de download manual para instalação pelo usuário.',
+                'Usa cuma_updater.exe externo para fechar o CUMA e substituir arquivos com segurança.',
+                'Valida SHA256 antes de instalar automaticamente.'
+            ],
+        }
+        if 'cuma_version_apply_globals' in globals():
+            try:
+                cuma_version_apply_globals(CUMA_11011_VERSION)
+            except Exception:
+                pass
+        if 'cuma_version_load_state' in globals() and 'cuma_version_save_state' in globals():
+            try:
+                state_data = cuma_version_load_state()
+                events = state_data.get('events', [])
+                if not isinstance(events, list):
+                    events = []
+                if not any(isinstance(e, dict) and e.get('update_id') == CUMA_11011_UPDATE_ID for e in events):
+                    events.append({
+                        'update_id': CUMA_11011_UPDATE_ID,
+                        'version': CUMA_11011_VERSION,
+                        'base_version': globals().get('CUMA_VERSION_BASE', '1.080.0'),
+                        'scale': 'pouca',
+                        'applied_at': datetime.now().isoformat(timespec='seconds'),
+                        'description': 'Atualizador automático externo via GitHub Releases.',
+                    })
+                state_data['events'] = events[-100:]
+                state_data['current_version'] = CUMA_11011_VERSION
+                state_data['base_version'] = globals().get('CUMA_VERSION_BASE', '1.080.0')
+                cuma_version_save_state(state_data)
+                if '_cuma_version_write_public_files' in globals():
+                    _cuma_version_write_public_files(state_data)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _cuma_install_auto_updater_11011() -> None:
+    try:
+        _cuma_ensure_update_settings_defaults()
+        globals()['_cuma_check_updates_button'] = _cuma_check_updates_button_async_11011
+    except Exception as exc:
+        try:
+            write_log(f'Instalação do atualizador automático 1.100.11: {exc}')
+        except Exception:
+            pass
+
+
+_cuma_11011_force_version()
+_cuma_install_auto_updater_11011()
+
+
+CUMA_11011_MANUAL_APPEND = """
+
+===============================================================================
+19. ATUALIZADOR AUTOMÁTICO VIA GITHUB - 1.100.11
+===============================================================================
+
+A janela "Procurar atualizações" agora possui duas opções quando há uma versão
+nova no GitHub Releases:
+
+- Atualizar agora: baixa CUMA_windows.zip, confere o SHA256 do stable.json,
+  inicia o cuma_updater.exe, fecha o CUMA e instala a nova versão.
+- Baixar manualmente: abre o link do pacote para o usuário baixar e atualizar
+  quando preferir.
+
+Por segurança, a atualização automática exige SHA256 válido no stable.json.
+O script criar_exe_windows_e_zip.bat gera esse valor automaticamente depois de
+compactar a release.
+"""
+
+try:
+    CUMA_11011_PREVIOUS_MANUAL = globals().get('CUMA_11010_MANUAL_TEXT', '')
+    CUMA_11011_MANUAL_TEXT = (CUMA_11011_PREVIOUS_MANUAL or '') + CUMA_11011_MANUAL_APPEND
+except Exception:
+    CUMA_11011_MANUAL_TEXT = CUMA_11011_MANUAL_APPEND
+
+
+def ensure_manual() -> Path:
+    try:
+        manual_manual_text = CUMA_11011_MANUAL_TEXT or CUMA_11011_MANUAL_APPEND
+        manual_path().write_text(manual_manual_text, encoding='utf-8')
+    except Exception:
+        pass
+    return manual_path()
+
+
+def _cuma_11011_write_runtime_docs() -> None:
+    try:
+        ensure_manual()
+    except Exception:
+        pass
+    try:
+        readme = globals().get('CUMA_11010_README_TXT', '')
+        readme = readme.replace('Versão: 1.100.10', 'Versão: 1.100.11')
+        readme += """
+
+ATUALIZADOR AUTOMÁTICO DA 1.100.11
+- Botão Atualizar agora baixa, valida e instala a atualização automaticamente.
+- Botão Baixar manualmente continua disponível.
+- O CUMA é fechado para que os arquivos possam ser substituídos com segurança.
+"""
+        (app_dir() / 'LEIA-ME.txt').write_text(readme, encoding='utf-8')
+    except Exception:
+        pass
+
+
+_cuma_11011_write_runtime_docs()
+
 
 if __name__ == '__main__':
     main()
