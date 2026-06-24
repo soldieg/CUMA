@@ -2,21 +2,15 @@
   "app_id": "cuma",
   "channel": "stable",
   "version": "1.100.8",
-  "minimum_supported_version": "1.100.0",
+  "minimum_supported_version": "1.080.0",
   "mandatory": false,
   "published_at": "2026-06-23",
-  "download_url": "https://github.com/soldieg/CUMA/releases/download/STABLE/CUMA_windows.zip",
+  "download_url": "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip",
   "sha256": "435114B489E4234E3A9FB0148D417F615B1981B9475BAA24F425B0D17C55C205",
   "size_bytes": 53256023,
   "release_notes": [
-    "CUMA 1.100.8 - Correções de auditoria",
-    "Corrigido bug de CBZ/ZIP no Converter.",
-    "Corrigido suporte de CBR/RAR/7Z no Converter quando 7-Zip está instalado.",
-    "Adicionada escrita temporária/atômica para EPUB, CBZ e PDFs gerados.",
-    "Ferramentas validam arquivos existentes antes de processar.",
-    "Removido empacotamento de dados locais de usuário.",
-    "Build BAT agora copia documentação recente e prepara manifesto com SHA256/tamanho.",
-    "requirements.txt agora usa faixas de versão.",
-    "Versionamento, manual e histórico alinhados com 1.100.8."
-  ],
+    "Correções da auditoria: CBZ/ZIP, CBR/RAR/7Z, escrita atômica e validação de arquivos.",
+    "Pacote de release não inclui dados locais de usuário.",
+    "Melhorias nos manuais, histórico e atualizador."
+  ]
 }
