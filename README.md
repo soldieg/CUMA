@@ -109,7 +109,6 @@ Esta seção lista as fontes de código, bibliotecas, repositórios, serviços e
 
 O código do CUMA mantém uma referência explícita a esse repositório em `XTCJS_REPO_URL`. As rotinas atuais do CUMA geram XTCH/XTH nativamente em Python, sem executar Node, npm, Bun ou workers externos, mas essa referência deve ser mantida nos créditos por estar relacionada à implementação/entendimento do formato.
 
-
 ### Referência técnica de otimização para e-readers
 
 - **Kindle Comic Converter / KCC:** `https://github.com/ciromattia/kcc`
@@ -192,19 +191,3 @@ Esses módulos fazem parte do Python/CPython e não precisam ser instalados sepa
 - **JPEG/JPG, PNG, WebP, BMP, TIFF:** formatos de imagem lidos/escritos via Pillow.
 - **SHA-256:** usado para validar integridade do ZIP de atualização.
 - **MD5:** usado internamente em páginas XTH/XTCH para digest curto de dados de página.
-
-### Observação de créditos
-
-Esta lista foi montada a partir das referências explícitas, imports, URLs, arquivos de build e formatos encontrados no projeto. Se alguma rotina tiver sido adaptada de fórum, gist, issue, conversa técnica ou repositório externo que não esteja registrado no código, o link original deve ser adicionado aqui antes do lançamento público.
-
-## Fontes e referências acrescentadas neste update
-
-Além das bibliotecas já listadas, a versão `1.100.0` registra como referências principais:
-
-- **Kindle Comic Converter / KCC:** `https://github.com/ciromattia/kcc`
-- **Licença do KCC:** ISC License
-- **Uso no CUMA:** referência técnica para perfis de dispositivos, leitura de mangá/quadrinhos, otimização para e-readers, corte de páginas, páginas duplas e processamento de imagens.
-- **xtcjs:** `https://github.com/varo6/xtcjs`
-- **Uso no CUMA:** referência relacionada ao entendimento do formato XTC/XTCH/XTH.
-- **7-Zip:** `https://www.7-zip.org/`
-- **Uso no CUMA:** ferramenta externa opcional para abrir CBR/RAR/7Z no Windows.
