@@ -1,16 +1,19 @@
 {
   "app_id": "cuma",
   "channel": "stable",
-  "version": "1.100.8",
+  "version": "1.100.11",
   "minimum_supported_version": "1.080.0",
   "mandatory": false,
-  "published_at": "2026-06-23",
+  "published_at": "2026-06-24T03:38:36Z",
   "download_url": "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip",
-  "sha256": "435114B489E4234E3A9FB0148D417F615B1981B9475BAA24F425B0D17C55C205",
-  "size_bytes": 53256023,
+  "sha256": "C9B23DCFCFD6E9ACA319CB8CEC7C25F3ADDEB413AB430EEBC3D7445A904B1BEA",
+  "size_bytes": 62202910,
   "release_notes": [
-    "Correções da auditoria: CBZ/ZIP, CBR/RAR/7Z, escrita atômica e validação de arquivos.",
-    "Pacote de release não inclui dados locais de usuário.",
-    "Melhorias nos manuais, histórico e atualizador."
+    "Adiciona o botão \"Atualizar agora\" na janela de atualizações.",
+    "Mantém o botão \"Baixar manualmente\" para o usuário instalar quando preferir.",
+    "Baixa o pacote CUMA_windows.zip pelo link do stable.json.",
+    "Valida o SHA256 antes de instalar automaticamente.",
+    "Inicia o cuma_updater.exe externo, fecha o CUMA e substitui os arquivos com segurança.",
+    "Mantém backup da versão anterior ao aplicar a atualização."
   ]
 }
