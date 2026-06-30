@@ -20,6 +20,7 @@ import tempfile
 import time
 import traceback
 import zipfile
+import tarfile
 from datetime import datetime
 from pathlib import Path
 
@@ -45,15 +46,73 @@ def _message_box(title: str, text: str, error: bool = False) -> None:
         pass
 
 
-def _safe_log(path: Path | None, message: str) -> None:
+def _safe_log(path: Path | list[Path] | tuple[Path, ...] | set[Path] | None, message: str) -> None:
+    """Grava log seguro.
+
+    A partir da 1.100.29, o atualizador grava o mesmo evento em mais de um lugar:
+    - log temporário do update atual;
+    - log persistente ao lado do CUMA instalado.
+    """
     try:
         if path is None:
+            return
+        if isinstance(path, (list, tuple, set)):
+            for item in path:
+                _safe_log(item, message)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8", errors="replace") as f:
             f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {message}\n")
     except Exception:
         pass
+
+
+def _path_size(path: Path) -> int:
+    """Retorna tamanho aproximado de arquivo/pasta para diagnóstico."""
+    try:
+        if path.is_file() or path.is_symlink():
+            return int(path.stat().st_size)
+        if path.is_dir():
+            total = 0
+            for child in path.rglob("*"):
+                try:
+                    if child.is_file() or child.is_symlink():
+                        total += int(child.stat().st_size)
+                except Exception:
+                    pass
+            return total
+    except Exception:
+        pass
+    return 0
+
+
+def _path_summary(path: Path) -> str:
+    try:
+        if path.is_dir():
+            files = 0
+            dirs = 0
+            for child in path.rglob("*"):
+                try:
+                    if child.is_dir():
+                        dirs += 1
+                    elif child.is_file() or child.is_symlink():
+                        files += 1
+                except Exception:
+                    pass
+            return f"pasta, {files} arquivo(s), {dirs} subpasta(s), {_path_size(path)} bytes"
+        if path.exists() or path.is_symlink():
+            return f"arquivo, {_path_size(path)} bytes"
+        return "não existe"
+    except Exception as exc:
+        return f"erro ao resumir: {exc}"
+
+
+def _persistent_update_log_path(install_dir: Path) -> Path:
+    """Log persistente da atualização, mantido na pasta instalada do CUMA."""
+    try:
+        return Path(install_dir).resolve() / "CUMA_update.log"
+    except Exception:
+        return Path(tempfile.gettempdir()) / "CUMA_updates" / "CUMA_update.log"
 
 
 def _sha256_file(path: Path) -> str:
@@ -105,17 +164,26 @@ def _is_process_running(pid: int) -> bool:
 
 
 def _force_kill_process(pid: int, log_path: Path | None) -> None:
-    if pid <= 0 or os.name != "nt":
+    if pid <= 0:
         return
     try:
         _safe_log(log_path, f"Forçando encerramento do processo PID {pid}.")
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            timeout=12,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        else:
+            try:
+                os.kill(pid, 15)
+                time.sleep(1.0)
+                if _is_process_running(pid):
+                    os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
     except Exception as exc:
         _safe_log(log_path, f"Falha ao forçar encerramento do PID {pid}: {exc}")
 
@@ -140,13 +208,24 @@ def _wait_for_main_app_to_close(pid: int, log_path: Path | None, timeout_seconds
         time.sleep(0.25)
 
 
-def _extract_zip(archive_path: Path, extract_dir: Path, log_path: Path | None) -> None:
+def _extract_archive(archive_path: Path, extract_dir: Path, log_path: Path | None, archive_type: str = "") -> None:
     if extract_dir.exists():
         shutil.rmtree(extract_dir, ignore_errors=True)
     extract_dir.mkdir(parents=True, exist_ok=True)
+    archive_type = str(archive_type or "").lower().strip()
+    name = archive_path.name.lower()
     _safe_log(log_path, f"Extraindo pacote: {archive_path}")
+    if archive_type in ("tar.gz", "tgz") or name.endswith(".tar.gz") or name.endswith(".tgz"):
+        with tarfile.open(archive_path, "r:gz") as tf:
+            tf.extractall(extract_dir)
+        return
     with zipfile.ZipFile(archive_path, "r") as zf:
         zf.extractall(extract_dir)
+
+
+# Compatibilidade com chamadas antigas.
+def _extract_zip(archive_path: Path, extract_dir: Path, log_path: Path | None) -> None:
+    _extract_archive(archive_path, extract_dir, log_path, "zip")
 
 
 def _looks_like_cuma_payload(path: Path, main_exe_name: str) -> bool:
@@ -167,7 +246,7 @@ def _find_payload_root(extract_dir: Path, main_exe_name: str) -> Path:
         if _looks_like_cuma_payload(parent, main_exe_name):
             return parent
 
-    raise RuntimeError(f"O ZIP não contém uma pasta válida do CUMA com {main_exe_name} e _internal.")
+    raise RuntimeError(f"O pacote não contém uma pasta válida do CUMA com {main_exe_name} e _internal.")
 
 
 def _copy_payload_item(src: Path, dst: Path) -> None:
@@ -193,6 +272,7 @@ def _rollback(install_dir: Path, backup_dir: Path, touched_names: list[str], log
 
     # Restaura itens antigos.
     if backup_dir.exists():
+        _safe_log(log_path, f"Restaurando backup: {backup_dir} ({_path_summary(backup_dir)})")
         for item in backup_dir.iterdir():
             target = install_dir / item.name
             try:
@@ -202,6 +282,7 @@ def _rollback(install_dir: Path, backup_dir: Path, touched_names: list[str], log
                     else:
                         target.unlink()
                 shutil.move(str(item), str(target))
+                _safe_log(log_path, f"Restaurado do backup: {item.name}")
             except Exception as exc:
                 _safe_log(log_path, f"Falha restaurando {item.name}: {exc}")
 
@@ -211,6 +292,8 @@ def _install_payload(payload_dir: Path, install_dir: Path, backup_dir: Path, log
         raise RuntimeError(f"Pasta de instalação inválida: {install_dir}")
 
     backup_dir.mkdir(parents=True, exist_ok=True)
+    _safe_log(log_path, f"Backup desta atualização: {backup_dir}")
+    _safe_log(log_path, f"Instalação antes da cópia: {_path_summary(install_dir)}")
     skip_names = {
         "config_cuma.json",
         "cuma_settings.json",
@@ -226,6 +309,7 @@ def _install_payload(payload_dir: Path, install_dir: Path, backup_dir: Path, log
     if not items:
         raise RuntimeError("O pacote de atualização está vazio.")
 
+    _safe_log(log_path, f"Itens que serão instalados: {', '.join(p.name for p in items)}")
     touched: list[str] = []
     try:
         for src in items:
@@ -233,29 +317,37 @@ def _install_payload(payload_dir: Path, install_dir: Path, backup_dir: Path, log
             backup_target = backup_dir / src.name
 
             if target.exists() or target.is_symlink():
-                _safe_log(log_path, f"Movendo item antigo para backup: {target}")
+                _safe_log(log_path, f"Movendo item antigo para backup: {target} ({_path_summary(target)})")
                 if backup_target.exists():
                     if backup_target.is_dir() and not backup_target.is_symlink():
                         shutil.rmtree(backup_target, ignore_errors=True)
                     else:
                         backup_target.unlink()
                 shutil.move(str(target), str(backup_target))
+                _safe_log(log_path, f"Backup criado para {src.name}: {_path_summary(backup_target)}")
+            else:
+                _safe_log(log_path, f"Item novo sem versão anterior: {target}")
 
-            _safe_log(log_path, f"Instalando item novo: {src.name}")
+            _safe_log(log_path, f"Instalando item novo: {src.name} ({_path_summary(src)})")
             _copy_payload_item(src, target)
+            _safe_log(log_path, f"Item instalado: {target} ({_path_summary(target)})")
             touched.append(src.name)
     except Exception:
+        _safe_log(log_path, "ERRO durante cópia dos arquivos. Iniciando rollback.")
         _rollback(install_dir, backup_dir, touched, log_path)
         raise
+    _safe_log(log_path, f"Instalação depois da cópia: {_path_summary(install_dir)}")
 
 
 def _reopen_app(main_exe: Path, install_dir: Path, log_path: Path | None) -> None:
     if not main_exe.exists():
         _safe_log(log_path, f"Executável principal não encontrado para reabrir: {main_exe}")
         return
-    flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     try:
-        subprocess.Popen([str(main_exe)], cwd=str(install_dir), close_fds=True, creationflags=flags)
+        kwargs = {"cwd": str(install_dir), "close_fds": True}
+        if os.name == "nt":
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen([str(main_exe)], **kwargs)
         _safe_log(log_path, f"CUMA reaberto: {main_exe}")
     except Exception as exc:
         _safe_log(log_path, f"Falha ao reabrir CUMA: {exc}")
@@ -268,22 +360,30 @@ def run_update(request_path: Path) -> int:
 
     install_dir = Path(request["install_dir"]).resolve()
     archive_path = Path(request["archive_path"]).resolve()
-    main_exe_name = str(request.get("main_exe_name") or "cuma.exe")
+    main_exe_name = str(request.get("main_exe_name") or _default_main_exe_name_for_platform())
     main_pid = int(request.get("main_pid") or 0)
     expected_sha = _clean_sha(request.get("expected_sha256", ""))
     expected_size = int(request.get("expected_size_bytes") or 0)
     latest_version = str(request.get("latest_version") or "").strip() or "nova"
+    archive_type = str(request.get("archive_type") or "").strip()
     backup_keep = bool(request.get("keep_backup", True))
 
     work_dir = request_path.parent
     extract_dir = work_dir / "extraido"
-    backup_dir = install_dir.parent / f"CUMA_backup_antes_{latest_version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    log_path = work_dir / "CUMA_update.log"
+    # 1.100.29: backup único substituído a cada atualização.
+    backup_dir = install_dir.parent / "CUMA_backup_anterior"
+    persistent_log = Path(request.get("persistent_log_path") or _persistent_update_log_path(install_dir)).resolve()
+    log_path = [work_dir / "CUMA_update.log", persistent_log]
 
     try:
-        _safe_log(log_path, "Atualizador iniciado.")
+        _safe_log(log_path, "=" * 88)
+        _safe_log(log_path, "INSTALLER iniciado.")
+        _safe_log(log_path, f"Atualizador: {Path(sys.argv[0]).resolve() if sys.argv else 'desconhecido'}")
         _safe_log(log_path, f"Instalação: {install_dir}")
         _safe_log(log_path, f"Pacote: {archive_path}")
+        _safe_log(log_path, f"Versão atual: {request.get('current_version', '')}")
+        _safe_log(log_path, f"Versão nova: {latest_version}")
+        _safe_log(log_path, f"Política de backup: backup único substituído ({backup_dir})")
 
         if not archive_path.exists():
             raise RuntimeError(f"Pacote de atualização não encontrado: {archive_path}")
@@ -294,21 +394,34 @@ def run_update(request_path: Path) -> int:
             )
         if expected_sha:
             got_sha = _sha256_file(archive_path)
+            _safe_log(log_path, f"SHA256 calculado pelo instalador: {got_sha}")
+            _safe_log(log_path, f"SHA256 esperado pelo manifesto: {expected_sha}")
             if got_sha != expected_sha:
+                _safe_log(log_path, "ERRO: SHA256 inválido no instalador. Instalação bloqueada.")
                 raise RuntimeError(f"SHA256 inválido. Esperado {expected_sha}, recebido {got_sha}.")
+            _safe_log(log_path, "SHA256 confirmado pelo instalador.")
+        else:
+            _safe_log(log_path, "AVISO: instalação sem SHA256 esperado.")
 
         _wait_for_main_app_to_close(main_pid, log_path)
-        _extract_zip(archive_path, extract_dir, log_path)
+        _extract_archive(archive_path, extract_dir, log_path, archive_type)
         payload_dir = _find_payload_root(extract_dir, main_exe_name)
         _safe_log(log_path, f"Raiz do pacote: {payload_dir}")
+        _safe_log(log_path, f"Resumo do pacote: {_path_summary(payload_dir)}")
+
+        if backup_dir.exists():
+            _safe_log(log_path, f"Backup anterior encontrado e será substituído: {backup_dir}")
+            try:
+                if backup_dir.is_dir() and not backup_dir.is_symlink():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                else:
+                    backup_dir.unlink()
+                _safe_log(log_path, "Backup anterior removido com sucesso.")
+            except Exception as exc:
+                _safe_log(log_path, f"Falha ao remover backup anterior: {exc}")
+                raise
 
         _install_payload(payload_dir, install_dir, backup_dir, log_path)
-
-        # Copia o log para a pasta do app depois da instalação.
-        try:
-            shutil.copy2(log_path, install_dir / "CUMA_update.log")
-        except Exception:
-            pass
 
         _safe_log(log_path, "Atualização instalada com sucesso.")
         if not backup_keep:
@@ -336,7 +449,7 @@ def run_update(request_path: Path) -> int:
             "Falha ao atualizar o CUMA",
             f"Não foi possível concluir a atualização automática.\n\n"
             f"Erro: {exc}\n\n"
-            f"O log foi salvo em:\n{log_path}",
+            f"O log foi salvo em:\n{persistent_log}",
             error=True,
         )
         return 1
@@ -352,6 +465,65 @@ def run_update(request_path: Path) -> int:
 # Modo verificação: o CUMA principal chama este programa com --check.
 # A partir daqui, o atualizador externo cuida de tudo.
 # =============================================================================
+
+
+def _current_platform_key() -> str:
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return "unknown"
+
+
+def _default_main_exe_name_for_platform() -> str:
+    return "cuma.exe" if _current_platform_key() == "windows" else "cuma"
+
+
+def _select_manifest_for_current_platform(manifest: dict) -> dict:
+    """Retorna os dados de update da plataforma atual.
+
+    Mantém compatibilidade com o stable.json antigo, mas prefere:
+      platforms.windows / platforms.linux / platforms.macos
+    """
+    platform = _current_platform_key()
+    selected = {"platform_key": platform}
+    try:
+        platforms = manifest.get("platforms", {})
+        if isinstance(platforms, dict):
+            item = platforms.get(platform) or {}
+            if isinstance(item, dict):
+                selected.update(item)
+    except Exception:
+        pass
+
+    # Campos globais continuam como fallback para Windows/manifesto antigo.
+    for key in ("version", "download_url", "sha256", "size_bytes", "release_notes", "asset_name", "archive_type", "main_exe_name"):
+        if not selected.get(key) and manifest.get(key) is not None:
+            selected[key] = manifest.get(key)
+
+    selected["version"] = str(manifest.get("version") or selected.get("version") or "").strip()
+    if not selected.get("main_exe_name"):
+        selected["main_exe_name"] = _default_main_exe_name_for_platform()
+    if not selected.get("asset_name"):
+        try:
+            url = str(selected.get("download_url") or "")
+            selected["asset_name"] = Path(url.split("?", 1)[0]).name or (
+                "CUMA_windows.zip" if platform == "windows" else
+                "CUMA_macos.zip" if platform == "macos" else
+                "CUMA_linux.tar.gz"
+            )
+        except Exception:
+            selected["asset_name"] = "CUMA_windows.zip"
+    if not selected.get("archive_type"):
+        name = str(selected.get("asset_name") or "").lower()
+        if name.endswith(".tar.gz") or name.endswith(".tgz"):
+            selected["archive_type"] = "tar.gz"
+        else:
+            selected["archive_type"] = "zip"
+    return selected
+
 
 DEFAULT_MANIFEST_URL = "https://raw.githubusercontent.com/soldieg/CUMA/main/updates/stable.json"
 DEFAULT_DOWNLOAD_URL = "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip"
@@ -389,7 +561,7 @@ def _download_file(url: str, dest: Path, expected_size: int = 0, progress_cb=Non
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(
         str(url),
-        headers={"User-Agent": "CUMA-External-Updater/1.100.12"},
+        headers={"User-Agent": "CUMA-External-Updater/1.100.29"},
     )
     downloaded = 0
     last_report = 0.0
@@ -456,6 +628,7 @@ def _create_update_request(
     download_url: str,
     manifest_url: str,
     work_dir: Path,
+    archive_type: str = "",
 ) -> Path:
     request = {
         "schema": "CUMA_UPDATE_REQUEST",
@@ -470,7 +643,11 @@ def _create_update_request(
         "expected_size_bytes": int(expected_size or 0),
         "download_url": str(download_url or "").strip(),
         "manifest_url": str(manifest_url or "").strip(),
+        "archive_type": str(archive_type or "").strip(),
+        "platform": _current_platform_key(),
         "keep_backup": True,
+        "backup_policy": "single_replace",
+        "persistent_log_path": str(_persistent_update_log_path(install_dir)),
     }
     request_file = work_dir / "update_request.json"
     request_file.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -482,7 +659,7 @@ def _fetch_manifest(manifest_url: str) -> dict:
 
     req = urllib.request.Request(
         str(manifest_url or DEFAULT_MANIFEST_URL),
-        headers={"User-Agent": "CUMA-External-Update-Checker/1.100.12"},
+        headers={"User-Agent": "CUMA-External-Update-Checker/1.100.29"},
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -490,20 +667,22 @@ def _fetch_manifest(manifest_url: str) -> dict:
 
 def _launch_request_installer(request_file: Path, work_dir: Path) -> None:
     cmd = _copy_self_to_temp(work_dir, request_file)
-    flags = 0
+    kwargs = {"cwd": str(work_dir), "close_fds": True}
     if os.name == "nt":
-        flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen(cmd, cwd=str(work_dir), close_fds=True, creationflags=flags)
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(cmd, **kwargs)
 
 
 def _simple_console_check(args) -> int:
     """Fallback sem janela gráfica, útil para testes ou ambientes sem Tk."""
     manifest = _fetch_manifest(args.manifest_url)
-    latest = str(manifest.get("version", "") or "").strip()
+    selected = _select_manifest_for_current_platform(manifest)
+    latest = str(manifest.get("version", "") or selected.get("version", "") or "").strip()
     current = str(args.current_version or "").strip()
     if latest and _version_tuple(latest) > _version_tuple(current):
         print(f"Atualização disponível: {latest}")
-        print(str(manifest.get("download_url") or DEFAULT_DOWNLOAD_URL))
+        print(f"Plataforma: {_current_platform_key()}")
+        print(str(selected.get("download_url") or manifest.get("download_url") or DEFAULT_DOWNLOAD_URL))
         return 2
     print("Você já está usando a versão mais recente.")
     return 0
@@ -515,7 +694,7 @@ def run_check(args) -> int:
     current_version = str(args.current_version or "").strip() or "0.0.0"
     install_dir = Path(args.install_dir or ".").resolve()
     main_pid = int(args.main_pid or 0)
-    main_exe_name = str(args.main_exe_name or "cuma.exe").strip() or "cuma.exe"
+    main_exe_name = str(args.main_exe_name or _default_main_exe_name_for_platform()).strip() or _default_main_exe_name_for_platform()
 
     try:
         import tkinter as tk
@@ -548,7 +727,7 @@ def run_check(args) -> int:
     title_var = tk.StringVar(value="Verificando atualizações...")
     subtitle_var = tk.StringVar(value="Consultando o manifesto do GitHub Releases.")
     status_var = tk.StringVar(value="")
-    state = {"manifest": None, "latest": "", "download_url": "", "sha256": "", "size_bytes": 0}
+    state = {"manifest": None, "latest": "", "download_url": "", "sha256": "", "size_bytes": 0, "asset_name": "", "archive_type": "", "platform": _current_platform_key()}
 
     tk.Label(container, textvariable=title_var, bg=surface, fg=fg, font=("Segoe UI", 15, "bold"),
              anchor="w", justify="left").pack(fill="x")
@@ -641,14 +820,29 @@ def run_check(args) -> int:
                 temp_base.mkdir(parents=True, exist_ok=True)
                 work_dir = temp_base / f"update_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
                 work_dir.mkdir(parents=True, exist_ok=True)
-                archive_path = work_dir / "CUMA_windows.zip"
+                archive_path = work_dir / str(state.get("asset_name") or ("CUMA_windows.zip" if _current_platform_key() == "windows" else "CUMA_macos.zip" if _current_platform_key() == "macos" else "CUMA_linux.tar.gz"))
+                update_log = [work_dir / "CUMA_update.log", _persistent_update_log_path(install_dir)]
+
+                _safe_log(update_log, "=" * 88)
+                _safe_log(update_log, "CHECK/AUTO_UPDATE iniciado.")
+                _safe_log(update_log, f"Versão instalada: {current_version}")
+                _safe_log(update_log, f"Versão disponível: {state.get('latest', '')}")
+                _safe_log(update_log, f"Manifesto: {manifest_url}")
+                _safe_log(update_log, f"Download: {download_url}")
+                _safe_log(update_log, f"Instalação: {install_dir}")
+                _safe_log(update_log, f"PID principal: {main_pid}")
 
                 _download_file(download_url, archive_path, expected_size, set_status)
+                _safe_log(update_log, f"Download concluído: {archive_path} ({archive_path.stat().st_size if archive_path.exists() else 0} bytes)")
 
                 set_status("Verificando SHA256 do pacote...")
                 got_sha = _sha256_file(archive_path)
+                _safe_log(update_log, f"SHA256 calculado: {got_sha}")
+                _safe_log(update_log, f"SHA256 esperado:  {expected_sha}")
                 if got_sha != expected_sha:
+                    _safe_log(update_log, "ERRO: SHA256 inválido. Instalação bloqueada.")
                     raise RuntimeError(f"SHA256 inválido. Esperado {expected_sha}, recebido {got_sha}.")
+                _safe_log(update_log, "SHA256 validado com sucesso.")
 
                 request_file = _create_update_request(
                     install_dir=install_dir,
@@ -662,10 +856,13 @@ def run_check(args) -> int:
                     download_url=download_url,
                     manifest_url=manifest_url,
                     work_dir=work_dir,
+                    archive_type=str(state.get("archive_type") or ""),
                 )
 
+                _safe_log(update_log, f"Arquivo de requisição criado: {request_file}")
                 set_status("Instalador iniciado. O CUMA será fechado para atualizar os arquivos...")
                 _launch_request_installer(request_file, work_dir)
+                _safe_log(update_log, "Instalador externo temporário iniciado.")
                 try:
                     root.after(700, root.destroy)
                 except Exception:
@@ -689,16 +886,20 @@ def run_check(args) -> int:
 
     def render_result(manifest: dict):
         state["manifest"] = manifest
-        latest = str(manifest.get("version", "") or "").strip()
+        selected = _select_manifest_for_current_platform(manifest)
+        latest = str(manifest.get("version", "") or selected.get("version", "") or "").strip()
         state["latest"] = latest
-        state["download_url"] = str(manifest.get("download_url", "") or DEFAULT_DOWNLOAD_URL).strip()
-        state["sha256"] = str(manifest.get("sha256", "") or "").strip()
+        state["platform"] = str(selected.get("platform_key") or _current_platform_key())
+        state["download_url"] = str(selected.get("download_url", "") or manifest.get("download_url", "") or DEFAULT_DOWNLOAD_URL).strip()
+        state["sha256"] = str(selected.get("sha256", "") or manifest.get("sha256", "") or "").strip()
+        state["asset_name"] = str(selected.get("asset_name", "") or "").strip()
+        state["archive_type"] = str(selected.get("archive_type", "") or "").strip()
         try:
-            state["size_bytes"] = int(manifest.get("size_bytes", 0) or 0)
+            state["size_bytes"] = int(selected.get("size_bytes", 0) or manifest.get("size_bytes", 0) or 0)
         except Exception:
             state["size_bytes"] = 0
 
-        notes = manifest.get("release_notes", [])
+        notes = selected.get("release_notes", manifest.get("release_notes", []))
         if isinstance(notes, list):
             notes_text = "\n".join(f"• {x}" for x in notes[:12])
         else:
@@ -722,6 +923,8 @@ def run_check(args) -> int:
                 f"Versão instalada: {current_version}",
                 f"Versão no GitHub: {latest}",
                 f"Manifesto: {manifest_url}",
+                f"Plataforma: {state.get('platform', _current_platform_key())}",
+                f"Pacote: {state.get('asset_name', '') or 'não informado'}",
                 "",
                 "Link de download:",
                 state["download_url"],
@@ -741,7 +944,8 @@ def run_check(args) -> int:
             set_text(
                 f"Versão instalada: {current_version}\n"
                 f"Versão no GitHub: {latest or 'não informada'}\n"
-                f"Manifesto: {manifest_url}"
+                f"Manifesto: {manifest_url}\n"
+                f"Plataforma: {_current_platform_key()}"
             )
 
     def render_error(exc: Exception):
