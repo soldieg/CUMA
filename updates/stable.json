@@ -5,7 +5,7 @@
   "minimum_supported_version": "1.080.0",
   "mandatory": false,
   "published_at": "2026-06-30T18:00:03Z",
-  "download_url": "https://github.com/soldieg/CUMA/releases/download/1.100.27/CUMA_windows.zip",
+  "download_url": "https://github.com/soldieg/CUMA/releases/download/Stable/CUMA_windows.zip",
   "sha256": "3A12003D69397B882E5BF8383AC904AA2CD7C9B916862CEF3E03BD98A80BB059",
   "size_bytes": 65919341,
   "release_notes": [
