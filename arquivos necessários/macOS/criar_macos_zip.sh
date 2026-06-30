@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$TOOLS_DIR/../.." && pwd)"
+SRC_DIR="$ROOT_DIR/GitHub"
+ZIP_DIR="$ROOT_DIR/ZIP final/macOS"
+APP_VERSION="1.100.27"
+OUT_DIR="dist/CUMA_macos"
+ZIP_NAME="CUMA_macos.zip"
+ZIP_PATH="$ZIP_DIR/$ZIP_NAME"
+RELEASE_NOTES="NOTAS_RELEASE_1.100.27_GITHUB.txt"
+
+cd "$SRC_DIR"
+mkdir -p "$ZIP_DIR"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "[ERRO] Python 3.11+ nao encontrado para compilar." >&2
+  exit 1
+fi
+
+if [ ! -x ".venv/bin/python" ]; then
+  python3 -m venv .venv
+fi
+
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+rm -rf build dist
+
+echo "Gerando CUMA_macos autocontido..."
+python -m PyInstaller --noconfirm cuma_macos.spec
+
+test -x "$OUT_DIR/cuma"
+test -x "$OUT_DIR/cuma_updater"
+
+cp -f manual_do_programa.txt "$OUT_DIR/manual_do_programa.txt" 2>/dev/null || true
+cp -f LEIA-ME.txt README.md LICENSE "$OUT_DIR/" 2>/dev/null || true
+cp -f "NOTAS_RELEASE_1.100.27_GITHUB.txt" "AUDITORIA_DEBUG_1.100.27.txt" "$OUT_DIR/" 2>/dev/null || true
+
+rm -f "$OUT_DIR"/CUMA.log "$OUT_DIR"/CUMA_update.log "$OUT_DIR"/erro.txt "$OUT_DIR"/debug_completo_cuma.txt "$OUT_DIR"/cuma_settings.json "$OUT_DIR"/config_cuma.json
+rm -rf "$OUT_DIR"/.cuma_user_data "$OUT_DIR"/limpos
+
+chmod +x "$OUT_DIR/cuma" "$OUT_DIR/cuma_updater"
+
+rm -f "$ZIP_PATH"
+(cd dist && zip -r "$ZIP_PATH" CUMA_macos)
+
+python scripts/preparar_manifesto_release.py soldieg CUMA "$APP_VERSION" "$ZIP_PATH" Stable "$RELEASE_NOTES" macos || true
+
+echo "OK: $ZIP_PATH"

@@ -1,0 +1,34 @@
+CUMA 1.100.27 - scripts de build autocontidos
+==============================================
+
+Estrutura:
+
+arquivos necessários/
+  criar_todos_os_pacotes.bat
+  criar_pacote_da_plataforma_atual.sh
+  Windows/
+    criar_windows.bat
+    rodar_cuma_windows.bat
+  Linux/
+    criar_linux_tar.sh
+    rodar_cuma_linux.sh
+  macOS/
+    criar_macos_zip.sh
+    rodar_cuma_macos.sh
+
+O usuário final NÃO precisa instalar Python nem bibliotecas.
+O computador que compila precisa ter Python e PyInstaller porque ele monta o pacote autocontido.
+
+Limitação importante:
+PyInstaller não faz cross-compile real. Então:
+- Windows precisa ser compilado no Windows.
+- Linux precisa ser compilado no Linux.
+- macOS precisa ser compilado no macOS.
+
+Para você não precisar ter Linux/macOS, use o workflow:
+.github/workflows/build_multiplataforma.yml
+
+Ele cria:
+ZIP final/Windows/CUMA_windows.zip
+ZIP final/Linux/CUMA_linux.tar.gz
+ZIP final/macOS/CUMA_macos.zip
