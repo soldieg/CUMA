@@ -3,13 +3,13 @@ r"""
 Prepara o manifesto de atualização do CUMA para GitHub Releases.
 
 Uso Windows:
-  python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.30 C:\caminho\CUMA_windows.zip Stable NOTAS.txt windows
+  python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.36 C:\caminho\CUMA_windows.zip Stable NOTAS.txt windows
 
 Uso Linux:
-  python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.30 /tmp/CUMA_linux.tar.gz Stable NOTAS.txt linux
+  python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.36 /tmp/CUMA_linux.tar.gz Stable NOTAS.txt linux
 
 Uso macOS:
-  python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.30 /tmp/CUMA_macos.zip Stable NOTAS.txt macos
+  python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.36 /tmp/CUMA_macos.zip Stable NOTAS.txt macos
 
 O script mantém compatibilidade com o formato antigo, mas agora também escreve:
   stable.json -> platforms.windows / platforms.linux / platforms.macos
@@ -24,6 +24,14 @@ from pathlib import Path
 from datetime import date
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def write_json_atomic(path: Path, data: dict) -> None:
+    """Grava JSON completo e só então substitui o destino."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def sha256_file(path: Path) -> str:
@@ -75,7 +83,7 @@ def asset_defaults(platform: str) -> tuple[str, str, str]:
 
 def main() -> int:
     if len(sys.argv) < 4:
-        print("Uso: python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.30 [pacote] [Stable] [NOTAS.md] [windows|linux|macos]")
+        print("Uso: python scripts/preparar_manifesto_release.py soldieg CUMA 1.100.36 [pacote] [Stable] [NOTAS.md] [windows|linux|macos]")
         return 2
 
     owner = sys.argv[1].strip()
@@ -89,8 +97,15 @@ def main() -> int:
 
     if len(sys.argv) >= 5 and sys.argv[4].strip():
         candidate = Path(sys.argv[4]).expanduser()
-        if candidate.exists() or str(candidate).lower().endswith((".zip", ".tar.gz", ".tgz")):
+        looks_like_package = str(candidate).lower().endswith((".zip", ".tar.gz", ".tgz"))
+        if candidate.exists():
+            if not candidate.is_file():
+                print(f"ERRO: o pacote não é um arquivo regular: {candidate}", file=sys.stderr)
+                return 2
             package_path = candidate.resolve()
+        elif looks_like_package:
+            print(f"ERRO: pacote informado não existe: {candidate}", file=sys.stderr)
+            return 2
         else:
             release_tag = sys.argv[4].strip()
 
@@ -148,7 +163,7 @@ def main() -> int:
         if platform == "windows":
             updates["download_url"] = download_url
         data.setdefault("versioning", {})["current_version"] = version
-        template_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(template_path, data)
 
     stable_path = ROOT / "updates" / "stable.json"
     stable_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,7 +207,7 @@ def main() -> int:
         "Cada pacote deve ser gerado na própria plataforma ou pelo GitHub Actions."
     )
 
-    stable_path.write_text(json.dumps(stable, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(stable_path, stable)
 
     print("Manifesto atualizado:")
     print(f"- {stable_path}")

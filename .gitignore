@@ -44,3 +44,9 @@ RELATORIO_*.txt
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# A entrada automatizada pode usar um payload compactado.
+!release/inbox/**/payload.zip
+
+# Contextos temporários do pipeline local
+.release-runtime/

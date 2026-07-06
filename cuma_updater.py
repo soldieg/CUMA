@@ -21,6 +21,7 @@ import time
 import traceback
 import zipfile
 import tarfile
+import stat
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,12 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 DETACHED_PROCESS = 0x00000008 if os.name == "nt" else 0
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if os.name == "nt" else 0
 STILL_ACTIVE = 259
+
+# Limites defensivos para evitar downloads/arquivos compactados abusivos.
+MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 100_000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
 
 
 def _message_box(title: str, text: str, error: bool = False) -> None:
@@ -189,6 +196,7 @@ def _force_kill_process(pid: int, log_path: Path | None) -> None:
 
 
 def _wait_for_main_app_to_close(pid: int, log_path: Path | None, timeout_seconds: float = 20.0) -> None:
+    """Espera o processo principal encerrar e nunca prossegue com ele ativo."""
     if pid <= 0:
         return
     _safe_log(log_path, f"Aguardando fechamento do CUMA. PID={pid}.")
@@ -207,23 +215,140 @@ def _wait_for_main_app_to_close(pid: int, log_path: Path | None, timeout_seconds
             return
         time.sleep(0.25)
 
+    raise RuntimeError(
+        f"O processo principal PID={pid} permaneceu ativo. "
+        "A atualização foi cancelada para não substituir arquivos em uso."
+    )
+
+
+def _safe_archive_target(root: Path, member_name: str) -> Path:
+    """Resolve um membro de arquivo compactado sem permitir saída da pasta alvo."""
+    raw = str(member_name or "").replace("\\", "/")
+    if not raw or raw.startswith("/") or raw.startswith("\\"):
+        raise RuntimeError(f"Caminho inválido no pacote: {member_name!r}")
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        raise RuntimeError(f"Caminho inseguro no pacote: {member_name!r}")
+    if ":" in parts[0]:
+        raise RuntimeError(f"Caminho absoluto/drive não permitido no pacote: {member_name!r}")
+
+    root_resolved = root.resolve()
+    target = root.joinpath(*parts).resolve()
+    try:
+        inside = os.path.commonpath([str(root_resolved), str(target)]) == str(root_resolved)
+    except Exception:
+        inside = False
+    if not inside:
+        raise RuntimeError(f"O pacote tentou gravar fora da pasta temporária: {member_name!r}")
+    return target
+
+
+def _apply_archive_mode(path: Path, mode: int) -> None:
+    if os.name == "nt" or not mode:
+        return
+    try:
+        # Preserva apenas permissões usuais; remove bits especiais.
+        os.chmod(path, mode & 0o777)
+    except Exception:
+        pass
+
+
+def _ensure_payload_executables(extract_dir: Path) -> None:
+    """Garante execução dos binários empacotados em Linux/macOS."""
+    if os.name == "nt":
+        return
+    executable_names = {"cuma", "cuma_updater", "CUMA"}
+    for candidate in extract_dir.rglob("*"):
+        try:
+            if candidate.is_file() and candidate.name in executable_names:
+                current = candidate.stat().st_mode
+                os.chmod(candidate, current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except Exception:
+            continue
+
 
 def _extract_archive(archive_path: Path, extract_dir: Path, log_path: Path | None, archive_type: str = "") -> None:
+    """Extrai ZIP/TAR com proteção de caminhos, tipos e limites de recursos."""
     if extract_dir.exists():
         shutil.rmtree(extract_dir, ignore_errors=True)
     extract_dir.mkdir(parents=True, exist_ok=True)
     archive_type = str(archive_type or "").lower().strip()
     name = archive_path.name.lower()
-    _safe_log(log_path, f"Extraindo pacote: {archive_path}")
+    _safe_log(log_path, f"Extraindo pacote com validação de caminhos e limites: {archive_path}")
+
+    def copy_limited(source, output, declared_size: int, member_name: str) -> None:
+        written = 0
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_ARCHIVE_MEMBER_BYTES:
+                raise RuntimeError(f"Entrada grande demais no pacote: {member_name}")
+            if declared_size >= 0 and written > declared_size:
+                raise RuntimeError(f"Entrada excedeu o tamanho declarado: {member_name}")
+            output.write(chunk)
+
     if archive_type in ("tar.gz", "tgz") or name.endswith(".tar.gz") or name.endswith(".tgz"):
         with tarfile.open(archive_path, "r:gz") as tf:
-            tf.extractall(extract_dir)
+            members = tf.getmembers()
+            if len(members) > MAX_ARCHIVE_MEMBERS:
+                raise RuntimeError(f"Pacote TAR contém entradas demais: {len(members)}")
+            total = sum(max(0, int(getattr(member, "size", 0) or 0)) for member in members if member.isfile())
+            if total > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                raise RuntimeError(f"Pacote TAR excede o limite descompactado: {total} bytes")
+
+            for member in members:
+                target = _safe_archive_target(extract_dir, member.name)
+                if member.issym() or member.islnk() or member.isdev():
+                    raise RuntimeError(f"Link/dispositivo não permitido no pacote TAR: {member.name}")
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    _apply_archive_mode(target, int(member.mode or 0))
+                    continue
+                if not member.isfile():
+                    raise RuntimeError(f"Tipo de entrada TAR não suportado: {member.name}")
+                if int(member.size or 0) > MAX_ARCHIVE_MEMBER_BYTES:
+                    raise RuntimeError(f"Entrada TAR grande demais: {member.name}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = tf.extractfile(member)
+                if source is None:
+                    raise RuntimeError(f"Não foi possível ler a entrada TAR: {member.name}")
+                with source, target.open("wb") as output:
+                    copy_limited(source, output, int(member.size or 0), member.name)
+                _apply_archive_mode(target, int(member.mode or 0))
+        _ensure_payload_executables(extract_dir)
         return
+
     with zipfile.ZipFile(archive_path, "r") as zf:
-        zf.extractall(extract_dir)
+        infos = zf.infolist()
+        if len(infos) > MAX_ARCHIVE_MEMBERS:
+            raise RuntimeError(f"Pacote ZIP contém entradas demais: {len(infos)}")
+        total = sum(max(0, int(info.file_size or 0)) for info in infos if not info.is_dir())
+        if total > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+            raise RuntimeError(f"Pacote ZIP excede o limite descompactado: {total} bytes")
 
+        for info in infos:
+            target = _safe_archive_target(extract_dir, info.filename)
+            unix_mode = (int(info.external_attr) >> 16) & 0xFFFF
+            file_type = stat.S_IFMT(unix_mode)
+            if file_type == stat.S_IFLNK:
+                raise RuntimeError(f"Link simbólico não permitido no pacote ZIP: {info.filename}")
+            if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise RuntimeError(f"Tipo especial não permitido no pacote ZIP: {info.filename}")
+            if int(info.file_size or 0) > MAX_ARCHIVE_MEMBER_BYTES:
+                raise RuntimeError(f"Entrada ZIP grande demais: {info.filename}")
+            if info.is_dir() or info.filename.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+                _apply_archive_mode(target, unix_mode)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as source, target.open("wb") as output:
+                copy_limited(source, output, int(info.file_size or 0), info.filename)
+            _apply_archive_mode(target, unix_mode)
 
-# Compatibilidade com chamadas antigas.
+    _ensure_payload_executables(extract_dir)
+
 def _extract_zip(archive_path: Path, extract_dir: Path, log_path: Path | None) -> None:
     _extract_archive(archive_path, extract_dir, log_path, "zip")
 
@@ -328,10 +453,12 @@ def _install_payload(payload_dir: Path, install_dir: Path, backup_dir: Path, log
             else:
                 _safe_log(log_path, f"Item novo sem versão anterior: {target}")
 
+            # Marca antes de copiar para que o rollback também remova diretórios
+            # novos parcialmente criados caso a cópia falhe no meio.
+            touched.append(src.name)
             _safe_log(log_path, f"Instalando item novo: {src.name} ({_path_summary(src)})")
             _copy_payload_item(src, target)
             _safe_log(log_path, f"Item instalado: {target} ({_path_summary(target)})")
-            touched.append(src.name)
     except Exception:
         _safe_log(log_path, "ERRO durante cópia dos arquivos. Iniciando rollback.")
         _rollback(install_dir, backup_dir, touched, log_path)
@@ -357,22 +484,36 @@ def _reopen_app(main_exe: Path, install_dir: Path, log_path: Path | None) -> Non
 def run_update(request_path: Path) -> int:
     request_path = request_path.resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not isinstance(request, dict) or request.get("schema") != "CUMA_UPDATE_REQUEST":
+        raise RuntimeError("Solicitação de atualização inválida ou com schema desconhecido.")
 
+    work_dir = request_path.parent.resolve()
     install_dir = Path(request["install_dir"]).resolve()
     archive_path = Path(request["archive_path"]).resolve()
-    main_exe_name = str(request.get("main_exe_name") or _default_main_exe_name_for_platform())
+    if not install_dir.exists() or not install_dir.is_dir():
+        raise RuntimeError(f"Pasta de instalação inválida: {install_dir}")
+    if install_dir == Path(install_dir.anchor):
+        raise RuntimeError("A raiz do sistema não pode ser usada como pasta de instalação.")
+    if archive_path.parent != work_dir:
+        raise RuntimeError("O pacote deve estar na mesma pasta temporária da solicitação.")
+
+    main_exe_name = str(request.get("main_exe_name") or _default_main_exe_name_for_platform()).strip()
+    if not main_exe_name or Path(main_exe_name).name != main_exe_name or main_exe_name in (".", ".."):
+        raise RuntimeError("Nome do executável principal inválido.")
     main_pid = int(request.get("main_pid") or 0)
     expected_sha = _clean_sha(request.get("expected_sha256", ""))
+    if len(expected_sha) != 64:
+        raise RuntimeError("Atualização bloqueada: SHA256 esperado ausente ou inválido.")
     expected_size = int(request.get("expected_size_bytes") or 0)
+    if expected_size <= 0 or expected_size > MAX_DOWNLOAD_BYTES:
+        raise RuntimeError("Atualização bloqueada: tamanho esperado ausente ou fora do limite.")
     latest_version = str(request.get("latest_version") or "").strip() or "nova"
     archive_type = str(request.get("archive_type") or "").strip()
     backup_keep = bool(request.get("keep_backup", True))
 
-    work_dir = request_path.parent
     extract_dir = work_dir / "extraido"
-    # 1.100.30: backup único substituído a cada atualização.
     backup_dir = install_dir.parent / "CUMA_backup_anterior"
-    persistent_log = Path(request.get("persistent_log_path") or _persistent_update_log_path(install_dir)).resolve()
+    persistent_log = _persistent_update_log_path(install_dir).resolve()
     log_path = [work_dir / "CUMA_update.log", persistent_log]
 
     try:
@@ -385,23 +526,21 @@ def run_update(request_path: Path) -> int:
         _safe_log(log_path, f"Versão nova: {latest_version}")
         _safe_log(log_path, f"Política de backup: backup único substituído ({backup_dir})")
 
-        if not archive_path.exists():
+        if not archive_path.is_file():
             raise RuntimeError(f"Pacote de atualização não encontrado: {archive_path}")
-        if expected_size > 0 and archive_path.stat().st_size != expected_size:
+        actual_size = archive_path.stat().st_size
+        if actual_size != expected_size:
             raise RuntimeError(
                 f"Tamanho do pacote diferente do manifesto. "
-                f"Esperado: {expected_size}; recebido: {archive_path.stat().st_size}."
+                f"Esperado: {expected_size}; recebido: {actual_size}."
             )
-        if expected_sha:
-            got_sha = _sha256_file(archive_path)
-            _safe_log(log_path, f"SHA256 calculado pelo instalador: {got_sha}")
-            _safe_log(log_path, f"SHA256 esperado pelo manifesto: {expected_sha}")
-            if got_sha != expected_sha:
-                _safe_log(log_path, "ERRO: SHA256 inválido no instalador. Instalação bloqueada.")
-                raise RuntimeError(f"SHA256 inválido. Esperado {expected_sha}, recebido {got_sha}.")
-            _safe_log(log_path, "SHA256 confirmado pelo instalador.")
-        else:
-            _safe_log(log_path, "AVISO: instalação sem SHA256 esperado.")
+        got_sha = _sha256_file(archive_path)
+        _safe_log(log_path, f"SHA256 calculado pelo instalador: {got_sha}")
+        _safe_log(log_path, f"SHA256 esperado pelo manifesto: {expected_sha}")
+        if got_sha != expected_sha:
+            _safe_log(log_path, "ERRO: SHA256 inválido no instalador. Instalação bloqueada.")
+            raise RuntimeError(f"SHA256 inválido. Esperado {expected_sha}, recebido {got_sha}.")
+        _safe_log(log_path, "SHA256 confirmado pelo instalador.")
 
         _wait_for_main_app_to_close(main_pid, log_path)
         _extract_archive(archive_path, extract_dir, log_path, archive_type)
@@ -411,15 +550,11 @@ def run_update(request_path: Path) -> int:
 
         if backup_dir.exists():
             _safe_log(log_path, f"Backup anterior encontrado e será substituído: {backup_dir}")
-            try:
-                if backup_dir.is_dir() and not backup_dir.is_symlink():
-                    shutil.rmtree(backup_dir, ignore_errors=True)
-                else:
-                    backup_dir.unlink()
-                _safe_log(log_path, "Backup anterior removido com sucesso.")
-            except Exception as exc:
-                _safe_log(log_path, f"Falha ao remover backup anterior: {exc}")
-                raise
+            if backup_dir.is_dir() and not backup_dir.is_symlink():
+                shutil.rmtree(backup_dir)
+            else:
+                backup_dir.unlink()
+            _safe_log(log_path, "Backup anterior removido com sucesso.")
 
         _install_payload(payload_dir, install_dir, backup_dir, log_path)
 
@@ -438,13 +573,10 @@ def run_update(request_path: Path) -> int:
             _rollback(install_dir, backup_dir, [], log_path)
         except Exception:
             pass
-
-        # Tenta reabrir o app antigo se ele ainda existir.
         try:
             _reopen_app(install_dir / main_exe_name, install_dir, log_path)
         except Exception:
             pass
-
         _message_box(
             "Falha ao atualizar o CUMA",
             f"Não foi possível concluir a atualização automática.\n\n"
@@ -458,14 +590,6 @@ def run_update(request_path: Path) -> int:
             shutil.rmtree(extract_dir, ignore_errors=True)
         except Exception:
             pass
-
-
-
-# =============================================================================
-# Modo verificação: o CUMA principal chama este programa com --check.
-# A partir daqui, o atualizador externo cuida de tudo.
-# =============================================================================
-
 
 def _current_platform_key() -> str:
     if sys.platform.startswith("win"):
@@ -558,43 +682,61 @@ def _human_size(num: int) -> str:
 def _download_file(url: str, dest: Path, expected_size: int = 0, progress_cb=None) -> None:
     import urllib.request
 
+    if expected_size < 0 or expected_size > MAX_DOWNLOAD_BYTES:
+        raise RuntimeError("Tamanho esperado do download fora do limite permitido.")
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(
         str(url),
-        headers={"User-Agent": "CUMA-External-Updater/1.100.30"},
+        headers={"User-Agent": "CUMA-External-Updater/1.100.36"},
     )
     downloaded = 0
     last_report = 0.0
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        total = expected_size
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            total = expected_size
+            try:
+                header_size = int(resp.headers.get("Content-Length") or 0)
+                if header_size > MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError("Servidor anunciou um pacote maior que o limite permitido.")
+                if not total and header_size:
+                    total = header_size
+            except ValueError:
+                pass
+
+            with dest.open("wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 512)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > MAX_DOWNLOAD_BYTES:
+                        raise RuntimeError("Download excedeu o limite máximo permitido.")
+                    if expected_size and downloaded > expected_size:
+                        raise RuntimeError("Download excedeu o tamanho declarado no manifesto.")
+                    f.write(chunk)
+                    now = time.time()
+                    if progress_cb and now - last_report > 0.25:
+                        last_report = now
+                        if total:
+                            pct = min(100, int(downloaded * 100 / max(1, total)))
+                            progress_cb(f"Baixando pacote... {pct}% ({_human_size(downloaded)} de {_human_size(total)})")
+                        else:
+                            progress_cb(f"Baixando pacote... {_human_size(downloaded)}")
+    except Exception:
         try:
-            header_size = int(resp.headers.get("Content-Length") or 0)
-            if not total and header_size:
-                total = header_size
+            dest.unlink(missing_ok=True)
         except Exception:
             pass
-
-        with dest.open("wb") as f:
-            while True:
-                chunk = resp.read(1024 * 512)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                now = time.time()
-                if progress_cb and now - last_report > 0.25:
-                    last_report = now
-                    if total:
-                        pct = min(100, int(downloaded * 100 / max(1, total)))
-                        progress_cb(f"Baixando pacote... {pct}% ({_human_size(downloaded)} de {_human_size(total)})")
-                    else:
-                        progress_cb(f"Baixando pacote... {_human_size(downloaded)}")
+        raise
 
     if expected_size and dest.stat().st_size != int(expected_size):
+        try:
+            dest.unlink(missing_ok=True)
+        except Exception:
+            pass
         raise RuntimeError(
-            f"Tamanho do ZIP diferente do manifesto. Esperado: {expected_size}; recebido: {dest.stat().st_size}."
+            f"Tamanho do pacote diferente do manifesto. Esperado: {expected_size}; recebido: {downloaded}."
         )
-
 
 def _copy_self_to_temp(work_dir: Path, request_file: Path) -> list[str]:
     """Gera o comando do instalador real em uma cópia temporária.
@@ -635,7 +777,7 @@ def _create_update_request(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "install_dir": str(install_dir),
         "archive_path": str(archive_path),
-        "main_exe_name": str(main_exe_name or "cuma.exe"),
+        "main_exe_name": str(main_exe_name or _default_main_exe_name_for_platform()),
         "main_pid": int(main_pid or 0),
         "latest_version": str(latest_version or "").strip(),
         "current_version": str(current_version or "").strip(),
@@ -659,7 +801,7 @@ def _fetch_manifest(manifest_url: str) -> dict:
 
     req = urllib.request.Request(
         str(manifest_url or DEFAULT_MANIFEST_URL),
-        headers={"User-Agent": "CUMA-External-Update-Checker/1.100.30"},
+        headers={"User-Agent": "CUMA-External-Update-Checker/1.100.36"},
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -985,11 +1127,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-version", default="", help="Versão instalada do CUMA.")
     parser.add_argument("--install-dir", default="", help="Pasta onde o CUMA está instalado.")
     parser.add_argument("--main-pid", default="0", help="PID do CUMA principal, usado para fechar antes de instalar.")
-    parser.add_argument("--main-exe-name", default="cuma.exe", help="Nome do executável principal.")
+    parser.add_argument("--main-exe-name", default="", help="Nome do executável principal; vazio usa o padrão da plataforma.")
     args = parser.parse_args(argv)
 
     if args.request:
-        return run_update(Path(args.request))
+        try:
+            return run_update(Path(args.request))
+        except Exception as exc:
+            _message_box("Falha ao atualizar o CUMA", f"Solicitação de atualização inválida: {exc}", error=True)
+            return 1
     return run_check(args)
 
 

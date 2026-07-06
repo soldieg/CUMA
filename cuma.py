@@ -27,6 +27,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -62,7 +63,7 @@ except Exception:
     DND_AVAILABLE = False
 
 APP_NAME = "CUMA"
-APP_VERSION = "1.100.30 CUMA"
+APP_VERSION = "1.100.37 CUMA"
 CONFIG_FILE = "config_cuma.json"
 LOG_FILE = "CUMA.log"
 MANUAL_FILE = "manual_do_programa.txt"
@@ -111,7 +112,7 @@ class CleanerConfig:
     output_dir: str = ""
     mode: str = "auto"
     profile: str = "Normal"
-    compression: str = "Preservar qualidade máxima"
+    compression: str = "Original"
     export_format: str = "PDF"
     suffix: str = "_limpo"
     ranges: str = ""
@@ -148,7 +149,7 @@ class CleanerConfig:
     gpu_only_if_faster: bool = False
     gpu_fallback_cpu: bool = True
     clear_cache_on_exit: bool = False
-    log_level: str = "Normal"
+    log_level: str = "Debug"
     auto_save_log: bool = True
     log_retention_days: int = 30
     remember_last_folder: bool = True
@@ -703,6 +704,39 @@ class PDFCleaner:
             res.original_pages = total
             indices = set(parse_ranges(self.cfg.ranges, total))
             protected_indices: set[int] = set()
+            metadata_anchor_pages: set[int] = set()
+
+            # Capas/inícios de volume já cadastrados são âncoras estruturais.
+            # Quando a limpeza percorre o arquivo inteiro, essas páginas não podem
+            # ser descartadas como "pouco densas", pois são justamente as páginas
+            # que permitem remapear os volumes após divisões/remoções.
+            try:
+                metadata_reader = globals().get('_cuma_11013_read_embedded_metadata')
+                source_meta = metadata_reader(source) if callable(metadata_reader) else None
+                if isinstance(source_meta, dict):
+                    for volume in source_meta.get('volumes') or []:
+                        if not isinstance(volume, dict):
+                            continue
+                        for key in ('start_page', 'cover_page'):
+                            try:
+                                page_index = int(volume.get(key) or 0) - 1
+                            except Exception:
+                                continue
+                            if page_index in indices:
+                                metadata_anchor_pages.add(page_index)
+                    try:
+                        global_cover = int(source_meta.get('cover_page') or 0) - 1
+                        if global_cover in indices:
+                            metadata_anchor_pages.add(global_cover)
+                    except Exception:
+                        pass
+                    protected_indices.update(metadata_anchor_pages)
+            except Exception as exc:
+                try:
+                    write_log(f'Falha ao proteger capas de volume durante a limpeza: {exc}')
+                except Exception:
+                    pass
+
             if self.cfg.keep_first and total:
                 indices.add(0)
                 protected_indices.add(0)
@@ -792,6 +826,20 @@ class PDFCleaner:
                 p = Path(res.output)
                 res.final_size = p.stat().st_size if p.is_file() else 0
             res.saved_bytes = max(0, res.original_size - res.final_size) if res.final_size else 0
+
+            # Mapa exato da página original para a posição produzida pela limpeza
+            # básica. A etapa visual posterior compõe este mapa quando uma página
+            # dupla gera duas ou mais páginas.
+            try:
+                source_spans = {
+                    int(source_index) + 1: (output_index, output_index)
+                    for output_index, source_index in enumerate(kept_indices, 1)
+                }
+                res._cuma_source_page_spans = source_spans
+                res._cuma_source_pages = [int(index) + 1 for index in kept_indices]
+                res._cuma_metadata_anchor_pages = sorted(int(index) + 1 for index in metadata_anchor_pages)
+            except Exception:
+                pass
             return res
         finally:
             for doc in (src, out, removed_doc):
@@ -1098,7 +1146,7 @@ class BaseApp:
         self.auto_process_added = tk.BooleanVar(value=c.auto_process_added)
         self.skip_existing = tk.BooleanVar(value=c.skip_existing)
         self.detect_duplicates = tk.BooleanVar(value=c.detect_duplicates)
-        self.resume_processing = tk.BooleanVar(value=c.resume_processing)
+        self.resume_processing_enabled = tk.BooleanVar(value=c.resume_processing)
         self.silent_mode = tk.BooleanVar(value=c.silent_mode)
         self.theme.trace_add("write", lambda *_: (hasattr(self, "style") and self.apply_theme(), self.save_current_config()))
         self.font_size.trace_add("write", lambda *_: (hasattr(self, "style") and self.apply_theme(), self.save_current_config()))
@@ -1115,7 +1163,7 @@ class BaseApp:
         self.root.minsize(1180, 760)
         try:
             ico = resource_path("app_icon.ico")
-            if ico.exists():
+            if ico.exists() and sys.platform.startswith("win"):
                 self.root.iconbitmap(str(ico))
         except Exception as exc:
             write_log(f"Ícone não aplicado: {exc}")
@@ -1382,7 +1430,7 @@ class BaseApp:
         ttk.Checkbutton(perf, text="Limpar cache ao fechar", variable=self.clear_cache_on_exit, command=self.save_current_config).grid(row=11, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Button(perf, text="Testar aceleração", command=self.show_gpu_status, style="Ghost.TButton").grid(row=12, column=0, sticky="w", pady=(8, 0)); ttk.Button(perf, text="Benchmark CPU/GPU", command=self.run_gpu_benchmark, style="Ghost.TButton").grid(row=12, column=1, sticky="w", pady=(8, 0))
         files = ttk.LabelFrame(wrap, text="Arquivos, segurança e automação", padding=12, style="Card.TLabelframe"); files.pack(fill="x", pady=(0, 10))
-        for row, (txt, var) in enumerate((("Lembrar última pasta aberta", self.remember_last_folder), ("Pular arquivos já processados", self.skip_existing), ("Detectar PDFs duplicados na lista", self.detect_duplicates), ("Continuar de onde parou quando possível", self.resume_processing), ("Processar automaticamente ao adicionar arquivos", self.auto_process_added), ("Modo silencioso", self.silent_mode))):
+        for row, (txt, var) in enumerate((("Lembrar última pasta aberta", self.remember_last_folder), ("Pular arquivos já processados", self.skip_existing), ("Detectar PDFs duplicados na lista", self.detect_duplicates), ("Continuar de onde parou quando possível", self.resume_processing_enabled), ("Processar automaticamente ao adicionar arquivos", self.auto_process_added), ("Modo silencioso", self.silent_mode))):
             ttk.Checkbutton(files, text=txt, variable=var, command=self.save_current_config).grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
         logs = ttk.LabelFrame(wrap, text="Logs e diagnóstico", padding=12, style="Card.TLabelframe"); logs.pack(fill="x", pady=(0, 10))
         combo(logs, 0, "Nível de log", self.log_level, LOG_LEVELS, 18); ttk.Checkbutton(logs, text="Salvar log automaticamente", variable=self.auto_save_log, command=self.save_current_config).grid(row=1, column=0, columnspan=2, sticky="w", pady=4); spin(logs, 2, "Limpar logs após dias", self.log_retention_days, 3650, "0 = nunca")
@@ -1519,7 +1567,7 @@ class BaseApp:
         try:
             if hasattr(self, "notebook") and self.remember_last_tab.get(): last_tab = self.notebook.tab(self.notebook.select(), "text")
         except Exception: pass
-        self.cfg = CleanerConfig(self.output_dir.get(), self.mode.get(), self.profile.get(), self.compression.get(), self.export_format.get(), self.suffix.get(), self.ranges.get(), self.password.get(), self.keep_first.get(), self.safe_int(self.keep_last, 0), self.overwrite_original.get(), self.create_backup.get(), self.open_after.get(), self.include_subfolders.get(), self.save_removed_pdf.get(), self.validate_output.get(), self.theme.get(), self.xteink_device.get(), self.safe_int(self.xteink_quality, 88), self.xteink_converter_dir.get(), self.hardware_mode.get(), self.safe_int(self.worker_threads, 0), self.enable_page_cache.get(), self.safe_int(self.page_cache_mb, 256), self.auto_save_config.get(), self.font_size.get(), self.ui_density.get(), self.show_tooltips.get(), self.confirm_actions.get(), self.remember_window.get(), last_geo, self.remember_last_tab.get(), last_tab, self.performance_profile.get(), self.process_priority.get(), self.memory_saver.get(), self.safe_int(self.max_parallel_pdfs, 0), self.gpu_only_if_faster.get(), self.gpu_fallback_cpu.get(), self.clear_cache_on_exit.get(), self.log_level.get(), self.auto_save_log.get(), self.safe_int(self.log_retention_days, 30), self.remember_last_folder.get(), self.last_input_dir.get(), self.preview_quality.get(), self.safe_int(self.preview_batch_pages, 10), self.preview_cache.get(), self.preview_maximized.get(), self.safe_int(self.preview_thumb_width, 760), self.auto_process_added.get(), self.skip_existing.get(), self.detect_duplicates.get(), self.resume_processing.get(), self.silent_mode.get())
+        self.cfg = CleanerConfig(self.output_dir.get(), self.mode.get(), self.profile.get(), self.compression.get(), self.export_format.get(), self.suffix.get(), self.ranges.get(), self.password.get(), self.keep_first.get(), self.safe_int(self.keep_last, 0), self.overwrite_original.get(), self.create_backup.get(), self.open_after.get(), self.include_subfolders.get(), self.save_removed_pdf.get(), self.validate_output.get(), self.theme.get(), self.xteink_device.get(), self.safe_int(self.xteink_quality, 88), self.xteink_converter_dir.get(), self.hardware_mode.get(), self.safe_int(self.worker_threads, 0), self.enable_page_cache.get(), self.safe_int(self.page_cache_mb, 256), self.auto_save_config.get(), self.font_size.get(), self.ui_density.get(), self.show_tooltips.get(), self.confirm_actions.get(), self.remember_window.get(), last_geo, self.remember_last_tab.get(), last_tab, self.performance_profile.get(), self.process_priority.get(), self.memory_saver.get(), self.safe_int(self.max_parallel_pdfs, 0), self.gpu_only_if_faster.get(), self.gpu_fallback_cpu.get(), self.clear_cache_on_exit.get(), self.log_level.get(), self.auto_save_log.get(), self.safe_int(self.log_retention_days, 30), self.remember_last_folder.get(), self.last_input_dir.get(), self.preview_quality.get(), self.safe_int(self.preview_batch_pages, 10), self.preview_cache.get(), self.preview_maximized.get(), self.safe_int(self.preview_thumb_width, 760), self.auto_process_added.get(), self.skip_existing.get(), self.detect_duplicates.get(), self.resume_processing_enabled.get(), self.silent_mode.get())
         save_config(self.cfg)
 
     def on_close(self) -> None:
@@ -2106,7 +2154,7 @@ def _base_main() -> None:
 # uma nova atualização visual.
 # =============================================================================
 APP_DISPLAY_NAME = "CUMA"
-APP_DISPLAY_VERSION = "1.100.30"
+APP_DISPLAY_VERSION = "1.100.37"
 APP_SUBTITLE = "Limpeza, exportação e conversão de PDFs, imagens, EPUB e XTCH."
 INTERFACE_MAINTENANCE_RULE = (
     "Sempre que houver nova atualização visual, a interface antiga deve ser removida "
@@ -2608,7 +2656,7 @@ class App(BaseApp):
         install_global_error_handlers(self.root)
         try:
             ico = resource_path('app_icon.ico')
-            if ico.exists(): self.root.iconbitmap(str(ico))
+            if ico.exists() and sys.platform.startswith('win'): self.root.iconbitmap(str(ico))
         except Exception as exc:
             write_log(f'Ícone não aplicado: {exc}')
         self.root.after(40, lambda: self.fit_window_to_screen(self.root, width_ratio=0.82, height_ratio=0.82, min_width=1120, min_height=720))
@@ -3121,7 +3169,7 @@ def cuma_calculate_dynamic_version(base_version: str = CUMA_BASE_VERSION, update
         patch += 1
     return f'{major}.{minor}.{feature}.{recovery}.{patch}'
 
-APP_DISPLAY_VERSION = "1.100.30"
+APP_DISPLAY_VERSION = "1.100.37"
 
 
 def cuma_register_version_event(update_scale: str, description: str) -> None:
@@ -3485,7 +3533,7 @@ def _build_tools_tab_base_10602(self) -> None:
     _tools_make_clean_like_tab(self, tab_extract, 'extract', 'Extrair páginas', 'Extrai páginas dos PDFs desta lista como PNG/JPG. A saída vai para limpos/Ferramentas/<nome do PDF>.')
     _tools_make_clean_like_tab(self, tab_create, 'create', 'Criar PDF de imagens', 'Cria um PDF único usando as imagens desta lista. A saída vai para limpos/Ferramentas.')
     diag = ttk.LabelFrame(wrap, text='', padding=10, style='Card.TLabelframe'); diag.pack(fill='x', pady=(10, 0))
-    self.tools_debug_var = tk.StringVar(value='Ferramentas 1.0.6.0.2 carregadas; seleção visual das abas corrigida.')
+    self.tools_debug_var = tk.StringVar(value='Ferramentas carregadas; seleção visual das abas corrigida.')
     ttk.Label(diag, textvariable=self.tools_debug_var, style='Muted.TLabel', wraplength=1100, justify='left').pack(anchor='w')
 BaseApp.build_tools_tab = _build_tools_tab_base_10602
 
@@ -3711,7 +3759,7 @@ except Exception:
 # =============================================================================
 # CUMA 1.0.6.1.5 - CONVERTER REORGANIZADO + PERFIS DE DISPOSITIVO + UPDATE
 # =============================================================================
-CUMA_CONVERTER_DEVICE_UPDATE_VERSION = "1.100.30"
+CUMA_CONVERTER_DEVICE_UPDATE_VERSION = "1.100.37"
 APP_DISPLAY_VERSION = CUMA_CONVERTER_DEVICE_UPDATE_VERSION
 APP_VERSION = CUMA_CONVERTER_DEVICE_UPDATE_VERSION + ' CUMA'
 APP_NAME = 'CUMA'
@@ -9957,7 +10005,7 @@ def _cuma_1080_extend_translations() -> None:
             'Limpar cache ao sair': 'Clear cache on exit',
             'Arraste arquivos ou pastas aqui — Extrair páginas': 'Drag files or folders here — Extract pages',
             'Arraste arquivos ou pastas aqui — Criar PDF de imagens': 'Drag files or folders here — Create PDF from images',
-            'Ferramentas 1.0.6.0.2 carregadas; seleção visual das abas corrigida.': 'Tools 1.0.6.0.2 loaded; tab visual selection fixed.',
+            'Ferramentas carregadas; seleção visual das abas corrigida.': 'Tools 1.0.6.0.2 loaded; tab visual selection fixed.',
             'Sistema de versões': 'Version system',
             'Versão atual': 'Current version',
             'Base': 'Base',
@@ -10024,30 +10072,25 @@ def _cuma_deep_merge(base, extra):
 
 
 def cuma_user_data_dir() -> Path:
+    """Retorna uma única pasta de dados por usuário, também em modo fonte."""
     forced = os.environ.get('CUMA_USER_DATA_DIR', '').strip()
     if forced:
         root = Path(forced).expanduser()
-    elif getattr(sys, 'frozen', False):
-        if sys.platform.startswith('win'):
-            base = os.environ.get('APPDATA') or os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Roaming')
-            root = Path(base) / 'CUMA'
-        elif sys.platform == 'darwin':
-            root = Path.home() / 'Library' / 'Application Support' / 'CUMA'
-        else:
-            base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-            root = Path(base) / 'CUMA'
+    elif sys.platform.startswith('win'):
+        base = os.environ.get('APPDATA') or os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Roaming')
+        root = Path(base) / 'CUMA'
+    elif sys.platform == 'darwin':
+        root = Path.home() / 'Library' / 'Application Support' / 'CUMA'
     else:
-        root = app_dir() / '.cuma_user_data'
+        base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
+        root = Path(base) / 'CUMA'
     try:
         root.mkdir(parents=True, exist_ok=True)
+        return root
     except Exception:
-        try:
-            fallback = Path.cwd() / '.cuma_user_data'
-            fallback.mkdir(parents=True, exist_ok=True)
-            return fallback
-        except Exception:
-            return app_dir()
-    return root
+        fallback = Path(tempfile.gettempdir()) / f'CUMA-{getattr(os, "getuid", lambda: "user")()}'
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def cuma_settings_path() -> Path:
@@ -13137,54 +13180,186 @@ def _cuma_11000_app_processing_settings(self=None) -> dict:
 
 
 def _cuma_11000_set_processing_from_app(self) -> None:
-    _cuma_11000_save_processing_settings(_cuma_11000_app_processing_settings(self))
+    data = _cuma_11000_app_processing_settings(self)
+    strength = str(data.get('auto_crop_strength') or 'Off').strip().title()
+    enabled = bool(data.get('auto_crop'))
+    if enabled and strength == 'Off':
+        strength = 'Normal'
+        data['auto_crop_strength'] = strength
+        try:
+            self.cuma_auto_crop_strength.set(strength)
+        except Exception:
+            pass
+    elif not enabled:
+        data['auto_crop_strength'] = 'Off'
+        try:
+            self.cuma_auto_crop_strength.set('Off')
+        except Exception:
+            pass
+    _cuma_11000_save_processing_settings(data)
+
+
+def _cuma_11031_smooth_projection(values: np.ndarray, window: int) -> np.ndarray:
+    """Suaviza a densidade de conteúdo sem depender de OpenCV."""
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0 or window <= 1:
+        return values
+    window = max(1, min(int(window), int(values.size)))
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    return np.convolve(values, kernel, mode='same')
+
+
+def _cuma_11031_projection_bounds(values: np.ndarray, threshold: float, run: int):
+    """Retorna primeiro/último índice com conteúdo sustentado, ignorando ruído isolado."""
+    values = np.asarray(values, dtype=np.float32)
+    if values.size == 0:
+        return None
+    run = max(2, min(int(run), int(values.size)))
+    smoothed = _cuma_11031_smooth_projection(values, run)
+    active = smoothed >= float(threshold)
+    # Exige presença em linhas/colunas vizinhas para não cortar por um pixel solto.
+    support = np.convolve(active.astype(np.uint8), np.ones(run, dtype=np.uint8), mode='same')
+    idx = np.where(support >= max(2, run - 1))[0]
+    if idx.size == 0:
+        return None
+    return int(idx[0]), int(idx[-1]) + 1
 
 
 def _cuma_11000_find_content_bbox(img: Image.Image, strength='Normal'):
+    """
+    Detecta dinamicamente a área útil da página.
+
+    A detecção estima a cor do fundo pelas quatro bordas, procura conteúdo
+    sustentado por projeção horizontal/vertical e mantém uma margem de segurança.
+    Não usa um retângulo fixo: cada página recebe seu próprio limite.
+    """
     try:
-        arr = np.asarray(img.convert('L'))
-        if arr.size == 0:
+        strength = str(strength or 'Off').strip().title()
+        if strength == 'Off':
             return None
-        if strength == 'Suave':
-            white_delta, black_delta, min_ratio = 18, 18, 0.003
-        elif strength == 'Forte':
-            white_delta, black_delta, min_ratio = 8, 8, 0.001
+
+        gray = np.asarray(img.convert('L'), dtype=np.uint8)
+        if gray.ndim != 2 or gray.size == 0:
+            return None
+        height, width = gray.shape
+        if width < 32 or height < 32:
+            return None
+
+        configs = {
+            'Suave': {
+                'delta': 30.0, 'line_ratio': 0.018, 'run_ratio': 0.006,
+                'pad_ratio': 0.014, 'max_side_crop': 0.16,
+            },
+            'Normal': {
+                'delta': 20.0, 'line_ratio': 0.008, 'run_ratio': 0.004,
+                'pad_ratio': 0.010, 'max_side_crop': 0.22,
+            },
+            'Forte': {
+                'delta': 12.0, 'line_ratio': 0.0035, 'run_ratio': 0.003,
+                'pad_ratio': 0.006, 'max_side_crop': 0.30,
+            },
+        }
+        cfg = configs.get(strength, configs['Normal'])
+
+        # A faixa de amostragem cresce com a página, mas permanece pequena.
+        edge_y = max(3, min(24, int(round(height * 0.015))))
+        edge_x = max(3, min(24, int(round(width * 0.015))))
+        samples = np.concatenate((
+            gray[:edge_y, :].reshape(-1),
+            gray[-edge_y:, :].reshape(-1),
+            gray[:, :edge_x].reshape(-1),
+            gray[:, -edge_x:].reshape(-1),
+        ))
+        background = float(np.median(samples)) if samples.size else 255.0
+
+        # Em páginas claras, conteúdo é o que escurece em relação ao fundo.
+        # Em páginas escuras, usa distância absoluta para continuar seguro.
+        work = gray.astype(np.float32)
+        if background >= 170.0:
+            content = work <= (background - cfg['delta'])
+        elif background <= 85.0:
+            content = work >= (background + cfg['delta'])
         else:
-            white_delta, black_delta, min_ratio = 12, 12, 0.002
-        edges = np.concatenate([arr[:5, :].ravel(), arr[-5:, :].ravel(), arr[:, :5].ravel(), arr[:, -5:].ravel()])
-        bg = float(np.median(edges)) if edges.size else 255.0
-        mask = arr < max(0, bg - white_delta) if bg >= 128 else arr > min(255, bg + black_delta)
-        if float(mask.mean()) < min_ratio:
+            content = np.abs(work - background) >= cfg['delta']
+
+        # Páginas praticamente vazias não devem ser alteradas.
+        if float(content.mean()) < 0.0008:
             return None
-        ys, xs = np.where(mask)
-        if len(xs) == 0 or len(ys) == 0:
+
+        row_density = content.mean(axis=1)
+        col_density = content.mean(axis=0)
+        row_run = max(3, min(11, int(round(height * cfg['run_ratio']))))
+        col_run = max(3, min(11, int(round(width * cfg['run_ratio']))))
+        y_bounds = _cuma_11031_projection_bounds(row_density, cfg['line_ratio'], row_run)
+        x_bounds = _cuma_11031_projection_bounds(col_density, cfg['line_ratio'], col_run)
+        if not y_bounds or not x_bounds:
             return None
-        left, right = int(xs.min()), int(xs.max()) + 1
-        top, bottom = int(ys.min()), int(ys.max()) + 1
-        if (right - left) < img.width * 0.30 or (bottom - top) < img.height * 0.30:
+
+        top, bottom = y_bounds
+        left, right = x_bounds
+
+        # Evita aceitar uma mancha pequena como página inteira.
+        if (right - left) < width * 0.34 or (bottom - top) < height * 0.34:
             return None
-        pad = 6 if strength == 'Forte' else 12 if strength == 'Normal' else 20
-        left = max(0, left - pad); top = max(0, top - pad)
-        right = min(img.width, right + pad); bottom = min(img.height, bottom + pad)
-        if (right - left) >= img.width * 0.985 and (bottom - top) >= img.height * 0.985:
+
+        # Se uma lateral exigiria cortar uma parte exagerada, preserva essa lateral.
+        max_x = int(width * cfg['max_side_crop'])
+        max_y = int(height * cfg['max_side_crop'])
+        if left > max_x:
+            left = 0
+        if width - right > max_x:
+            right = width
+        if top > max_y:
+            top = 0
+        if height - bottom > max_y:
+            bottom = height
+
+        # Margem proporcional de segurança para quadros/textos próximos da borda.
+        pad_x = max(4, int(round(width * cfg['pad_ratio'])))
+        pad_y = max(4, int(round(height * cfg['pad_ratio'])))
+        left = max(0, left - pad_x)
+        right = min(width, right + pad_x)
+        top = max(0, top - pad_y)
+        bottom = min(height, bottom + pad_y)
+
+        # Mudanças mínimas não justificam reconstruir a página.
+        changed = (
+            left >= max(3, int(width * 0.002))
+            or top >= max(3, int(height * 0.002))
+            or (width - right) >= max(3, int(width * 0.002))
+            or (height - bottom) >= max(3, int(height * 0.002))
+        )
+        if not changed:
             return None
-        return (left, top, right, bottom)
+        return (int(left), int(top), int(right), int(bottom))
     except Exception as exc:
-        _cuma_11000_log('Corte automático ignorado', exc)
+        _cuma_11000_log('Remoção dinâmica de bordas ignorada', exc)
         return None
 
-
 def _cuma_11000_crop_margins(img: Image.Image, settings: dict) -> Image.Image:
-    if not settings.get('auto_crop'):
+    """Remove apenas a borda detectada para esta página, sem redimensionar/distorcer o conteúdo."""
+    strength = str(settings.get('auto_crop_strength') or 'Off').strip().title()
+    enabled = bool(settings.get('auto_crop')) and strength != 'Off'
+    if not enabled:
         return img
-    bbox = _cuma_11000_find_content_bbox(img, settings.get('auto_crop_strength', 'Normal'))
+    bbox = _cuma_11000_find_content_bbox(img, strength)
     if not bbox:
         return img
     try:
-        return img.crop(bbox)
-    except Exception:
+        cropped = img.crop(bbox)
+        counter = int(globals().get('_CUMA_11031_DYNAMIC_CROP_COUNT', 0)) + 1
+        globals()['_CUMA_11031_DYNAMIC_CROP_COUNT'] = counter
+        # Evita um log gigantesco em PDFs de milhares de páginas.
+        if counter <= 10 or counter % 250 == 0:
+            _cuma_11000_log(
+                f'Borda dinâmica removida #{counter}: '
+                f'{img.width}x{img.height} -> {cropped.width}x{cropped.height}; '
+                f'força={strength}; bbox={bbox}'
+            )
+        return cropped
+    except Exception as exc:
+        _cuma_11000_log('Falha ao aplicar remoção dinâmica de bordas', exc)
         return img
-
 
 def _cuma_11000_remove_page_number_area(img: Image.Image, settings: dict) -> Image.Image:
     if not settings.get('remove_page_numbers'):
@@ -13727,7 +13902,7 @@ def _cuma_11000_add_advanced_converter_panel(self) -> None:
         ttk.Label(panel, text='Corte', style='Muted.TLabel').grid(row=0, column=4, sticky='w', padx=(18, 8), pady=4)
         cb_crop = ttk.Combobox(panel, textvariable=self.cuma_auto_crop_strength, values=CUMA_11000_CROP_STRENGTHS, state='readonly', width=10)
         cb_crop.grid(row=0, column=5, sticky='w', pady=4)
-        ttk.Checkbutton(panel, text='Remover margens', variable=self.cuma_auto_crop, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover bordas brancas (dinâmico)', variable=self.cuma_auto_crop, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=0, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Remover número/rodapé', variable=self.cuma_remove_page_numbers, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=2, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=1, column=4, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=lambda: _cuma_11000_set_processing_from_app(self)).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
@@ -14450,7 +14625,7 @@ def _cuma_11001_add_clean_optimization_panel(self) -> None:
             except Exception:
                 pass
 
-        ttk.Checkbutton(panel, text='Remover margens', variable=self.cuma_auto_crop, command=save_processing).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover bordas brancas (dinâmico)', variable=self.cuma_auto_crop, command=save_processing).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Remover número/rodapé', variable=self.cuma_remove_page_numbers, command=save_processing).grid(row=2, column=2, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=save_processing).grid(row=2, column=4, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=save_processing).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
@@ -15578,34 +15753,69 @@ def _cuma_11003_insert_image_page(doc: fitz.Document, im: Image.Image, quality: 
 
 
 def _cuma_11003_process_clean_pdf_in_place(pdf_path: Path, settings: dict | None = None, cancel=None) -> dict:
-    """Aplica as opções da aba Limpar no PDF já limpo.
+    """Aplica transformações visuais sem rasterizar páginas que não precisam delas.
 
-    Esta etapa é propositalmente exclusiva da aba Limpar. O Converter permanece em
-    conversão pura e não chama este fluxo.
+    A opção padrão de dividir página dupla só transforma páginas realmente largas.
+    Páginas comuns são copiadas pelo mecanismo PDF, preservando texto, vetores,
+    links e qualidade original.
     """
     pdf_path = Path(pdf_path)
     data = settings if isinstance(settings, dict) else (
         _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
     )
+    split_enabled = bool(data.get('split_double_pages'))
+    preset = str(data.get('image_preset') or 'Original')
+    global_visual = bool(
+        data.get('auto_crop')
+        or data.get('remove_page_numbers')
+        or data.get('webtoon_split')
+        or preset != 'Original'
+    )
     stats = {
         'input_pages': 0,
         'output_pages': 0,
+        'transformed_pages': 0,
+        'preserved_pages': 0,
         'double_pages_split': 0,
         'webtoon_segments': 0,
-        'active': _cuma_11003_processing_active(data),
+        'active': bool(global_visual or split_enabled),
+        'page_map': {},
+        'page_spans': {},
     }
     if not stats['active'] or not pdf_path.exists() or pdf_path.suffix.lower() != '.pdf':
         return stats
 
     src = out = None
     tmp = pdf_path.with_suffix('.cuma_opt.tmp.pdf')
+    old_mode = None
     try:
+        try:
+            old_mode = stat.S_IMODE(pdf_path.stat().st_mode)
+        except Exception:
+            old_mode = None
         src = fitz.open(str(pdf_path))
         out = fitz.open()
         stats['input_pages'] = len(src)
+        page_map: dict[int, int] = {}
+        page_spans: dict[int, tuple[int, int]] = {}
+
         for idx, page in enumerate(src, 1):
             if cancel and cancel():
                 raise RuntimeError('Processamento cancelado pelo usuário.')
+
+            ratio = float(page.rect.width) / max(1.0, float(page.rect.height))
+            transform_page = global_visual or (split_enabled and ratio >= 1.22)
+            first_output_page = len(out) + 1
+            page_map[idx] = first_output_page
+
+            if not transform_page:
+                out.insert_pdf(src, from_page=idx - 1, to_page=idx - 1)
+                stats['output_pages'] += 1
+                stats['preserved_pages'] += 1
+                page_spans[idx] = (first_output_page, len(out))
+                continue
+
+            stats['transformed_pages'] += 1
             original = _cuma_11003_page_to_image(page)
             ow, oh = original.size
             produced = []
@@ -15619,10 +15829,16 @@ def _cuma_11003_process_clean_pdf_in_place(pdf_path: Path, settings: dict | None
                 produced = [original]
             if not produced:
                 produced = [original]
-            if len(produced) > 1 and data.get('split_double_pages') and ow / max(1, oh) >= 1.22:
+
+            if len(produced) > 1 and split_enabled and ow / max(1, oh) >= 1.22:
                 stats['double_pages_split'] += 1
-            if len(produced) > 1 and data.get('webtoon_split') and oh / max(1, ow) > float(data.get('webtoon_max_ratio', 2.8) or 2.8):
+            if (
+                len(produced) > 1
+                and data.get('webtoon_split')
+                and oh / max(1, ow) > float(data.get('webtoon_max_ratio', 2.8) or 2.8)
+            ):
                 stats['webtoon_segments'] += max(0, len(produced) - 1)
+
             for im in produced:
                 try:
                     _cuma_11003_insert_image_page(out, im, quality=94)
@@ -15637,15 +15853,59 @@ def _cuma_11003_process_clean_pdf_in_place(pdf_path: Path, settings: dict | None
                     original.close()
             except Exception:
                 pass
+            page_spans[idx] = (first_output_page, len(out))
 
+        stats['page_map'] = dict(page_map)
+        stats['page_spans'] = dict(page_spans)
+
+        if stats['transformed_pages'] <= 0:
+            # Nenhuma página atendia ao gatilho de página dupla; não regrava o PDF.
+            stats['active'] = False
+            return stats
         if stats['output_pages'] <= 0:
             raise RuntimeError('A otimização da aba Limpar não gerou páginas.')
+
+        # Preserva metadados e remapeia bookmarks quando uma página gera várias saídas.
+        try:
+            out.set_metadata(dict(src.metadata or {}))
+        except Exception as exc:
+            _cuma_11003_log('Metadados PDF comuns não puderam ser preservados', exc)
+        try:
+            old_toc = src.get_toc(simple=True) or []
+            new_toc = []
+            for item in old_toc:
+                if len(item) < 3:
+                    continue
+                level, title, old_page = item[:3]
+                mapped = page_map.get(int(old_page), int(old_page))
+                new_toc.append([int(level), str(title), int(mapped)])
+            if new_toc:
+                out.set_toc(new_toc)
+        except Exception as exc:
+            _cuma_11003_log('Bookmarks PDF não puderam ser remapeados', exc)
+        try:
+            if hasattr(src, 'embfile_names') and hasattr(out, 'embfile_add'):
+                for name in list(src.embfile_names() or []):
+                    try:
+                        raw = src.embfile_get(name)
+                        out.embfile_add(str(name), raw, filename=str(name), desc='Preservado pelo CUMA')
+                    except Exception as exc:
+                        _cuma_11003_log(f'Anexo PDF não preservado: {name}', exc)
+        except Exception:
+            pass
+
         tmp.unlink(missing_ok=True)
         out.save(str(tmp), garbage=4, deflate=True, clean=True)
-        src.close(); src = None
-        out.close(); out = None
-        pdf_path.unlink(missing_ok=True)
-        tmp.replace(pdf_path)
+        src.close()
+        src = None
+        out.close()
+        out = None
+        os.replace(str(tmp), str(pdf_path))
+        if old_mode is not None:
+            try:
+                os.chmod(pdf_path, old_mode)
+            except Exception:
+                pass
         return stats
     finally:
         for doc in (src, out):
@@ -15666,18 +15926,51 @@ _CUMA_11003_ORIGINAL_PDF_CLEAN = getattr(PDFCleaner, 'clean', None)
 def _cuma_11003_pdf_clean(self, source: Path, output_pdf: Path, progress=None, cancel=None) -> Result:
     result = _CUMA_11003_ORIGINAL_PDF_CLEAN(self, source, output_pdf, progress=progress, cancel=cancel)
     try:
+        base_spans = dict(getattr(result, '_cuma_source_page_spans', {}) or {})
+        result._cuma_source_page_spans_before_visual = dict(base_spans)
+        result._cuma_source_page_spans = dict(base_spans)
         settings = _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
         out_path = Path(getattr(result, 'output', '') or '')
         if out_path.exists() and out_path.suffix.lower() == '.pdf' and _cuma_11003_processing_active(settings):
             before_pages = int(getattr(result, 'final_pages', 0) or 0)
             stats = _cuma_11003_process_clean_pdf_in_place(out_path, settings=settings, cancel=cancel)
-            if stats.get('output_pages'):
+            result._cuma_visual_processing_stats = dict(stats)
+
+            # Compõe: página do PDF original -> página(s) do PDF pós-limpeza.
+            # Exemplo: se nove páginas anteriores à capa foram divididas, a capa
+            # original 410 passa automaticamente a apontar para 419.
+            visual_spans = stats.get('page_spans') if isinstance(stats, dict) else None
+            if base_spans and isinstance(visual_spans, dict) and visual_spans:
+                composed_spans = {}
+                for source_page, base_span in base_spans.items():
+                    try:
+                        if isinstance(base_span, (list, tuple)) and len(base_span) >= 2:
+                            pre_start, pre_end = int(base_span[0]), int(base_span[1])
+                        else:
+                            pre_start = pre_end = int(base_span)
+                        mapped_ranges = []
+                        for pre_page in range(min(pre_start, pre_end), max(pre_start, pre_end) + 1):
+                            visual = visual_spans.get(pre_page)
+                            if visual is None:
+                                visual = visual_spans.get(str(pre_page))
+                            if isinstance(visual, (list, tuple)) and len(visual) >= 2:
+                                mapped_ranges.append((int(visual[0]), int(visual[1])))
+                            elif visual is not None:
+                                mapped_ranges.append((int(visual), int(visual)))
+                        if mapped_ranges:
+                            composed_spans[int(source_page)] = (
+                                min(item[0] for item in mapped_ranges),
+                                max(item[1] for item in mapped_ranges),
+                            )
+                    except Exception:
+                        continue
+                if composed_spans:
+                    result._cuma_source_page_spans = composed_spans
+
+            if int(stats.get('transformed_pages') or 0) > 0:
                 result.final_pages = int(stats.get('output_pages') or result.final_pages)
                 try:
                     result.final_size = out_path.stat().st_size
-                except Exception:
-                    pass
-                try:
                     result.saved_bytes = max(0, int(result.original_size or 0) - int(result.final_size or 0))
                 except Exception:
                     pass
@@ -15841,7 +16134,7 @@ def _cuma_11003_add_clean_optimization_panel(self) -> None:
             except Exception:
                 pass
 
-        ttk.Checkbutton(panel, text='Remover margens', variable=self.cuma_auto_crop, command=save_processing).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(panel, text='Remover bordas brancas (dinâmico)', variable=self.cuma_auto_crop, command=save_processing).grid(row=2, column=0, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Remover número/rodapé', variable=self.cuma_remove_page_numbers, command=save_processing).grid(row=2, column=2, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Dividir páginas duplas', variable=self.cuma_split_double_pages, command=save_processing).grid(row=2, column=4, columnspan=2, sticky='w', pady=4)
         ttk.Checkbutton(panel, text='Manter original ao dividir', variable=self.cuma_split_keep_original, command=save_processing).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
@@ -16231,7 +16524,7 @@ def _cuma_11004_open_pdf_settings_window(self) -> None:
         cb_preset.grid(row=row, column=3, sticky='w', pady=5)
         row += 1
 
-        ttk.Checkbutton(wrapper, text='Remover margens automaticamente', variable=self.cuma_auto_crop, command=save_processing).grid(row=row, column=0, columnspan=2, sticky='w', pady=4)
+        ttk.Checkbutton(wrapper, text='Remover bordas brancas (dinâmico)', variable=self.cuma_auto_crop, command=save_processing).grid(row=row, column=0, columnspan=2, sticky='w', pady=4)
         ttk.Label(wrapper, text='Força do corte', style='Muted.TLabel').grid(row=row, column=2, sticky='w', padx=(18, 8), pady=5)
         cb_crop = ttk.Combobox(wrapper, textvariable=self.cuma_auto_crop_strength, values=('Suave', 'Normal', 'Forte'), state='readonly', width=12)
         cb_crop.grid(row=row, column=3, sticky='w', pady=5)
@@ -20148,60 +20441,86 @@ def _cuma_11013_read_pdf_metadata(path: Path) -> dict | None:
 
 
 def _cuma_11013_write_pdf_metadata(path: Path, meta: dict) -> bool:
+    """Grava metadados de modo atômico sem apagar o sumário existente."""
     path = Path(path)
     doc = None
+    tmp = path.with_suffix(path.suffix + '.cuma_meta.tmp')
+    old_mode = None
     try:
+        old_mode = stat.S_IMODE(path.stat().st_mode)
+        tmp.unlink(missing_ok=True)
         doc = fitz.open(str(path))
         meta = _cuma_11013_validate_metadata(meta, len(doc))
         title = str(meta.get('title') or path.stem)
         creator = str(meta.get('creator') or '')
         desc = str(meta.get('description') or '')
-        existing = doc.metadata or {}
+        existing = dict(doc.metadata or {})
+
+        old_keywords = [
+            part.strip()
+            for part in re.split(r'[;,]', str(existing.get('keywords') or ''))
+            if part.strip()
+        ]
+        keywords = []
+        seen = set()
+        for item in old_keywords + ['CUMA_METADATA', 'volumes', 'chapters']:
+            key = item.casefold()
+            if key not in seen:
+                seen.add(key)
+                keywords.append(item)
+
         new_md = dict(existing)
         new_md.update({
             'title': title,
             'author': creator,
-            'subject': desc or 'CUMA metadata',
-            'creator': 'CUMA',
-            'producer': (existing.get('producer') or 'CUMA'),
-            'keywords': 'CUMA_METADATA; volumes; chapters',
+            'subject': desc or existing.get('subject') or 'CUMA metadata',
+            'creator': existing.get('creator') or 'CUMA',
+            'producer': existing.get('producer') or 'CUMA',
+            'keywords': '; '.join(keywords),
         })
-        try:
-            doc.set_metadata(new_md)
-        except Exception:
-            pass
-        try:
+        doc.set_metadata(new_md)
+
+        # Nunca substitui capítulos/bookmarks criados pelo usuário. Somente cria
+        # marcadores de volume quando o PDF ainda não possui sumário.
+        existing_toc = doc.get_toc(simple=True) or []
+        if not existing_toc:
             toc = []
             for vol in meta.get('volumes', []):
                 page = int(vol.get('start_page') or 1)
-                if page >= 1 and page <= max(1, len(doc)):
-                    toc.append([1, str(vol.get('title') or f'Volume {vol.get("volume", "")}').strip(), page])
+                if 1 <= page <= max(1, len(doc)):
+                    title_value = str(vol.get('title') or f'Volume {vol.get("volume", "")}').strip()
+                    toc.append([1, title_value, page])
             if toc:
                 doc.set_toc(toc)
-        except Exception as exc:
-            _cuma_11013_log('Bookmarks PDF de metadados ignorados', exc)
+
         payload = _cuma_11013_metadata_to_json(meta)
+        if hasattr(doc, 'embfile_names') and hasattr(doc, 'embfile_del'):
+            for name in list(doc.embfile_names() or []):
+                if str(name).lower().endswith(CUMA_11013_METADATA_JSON_NAME.lower()):
+                    doc.embfile_del(name)
+        if hasattr(doc, 'embfile_add'):
+            doc.embfile_add(
+                CUMA_11013_METADATA_JSON_NAME,
+                payload,
+                filename=CUMA_11013_METADATA_JSON_NAME,
+                desc='CUMA embedded metadata',
+            )
+
+        # Salva em arquivo adjacente e troca atomicamente, evitando corrupção por
+        # interrupção durante saveIncr().
+        save_kwargs = {'garbage': 4, 'deflate': True, 'clean': True}
         try:
-            if hasattr(doc, 'embfile_names') and hasattr(doc, 'embfile_del'):
-                for name in list(doc.embfile_names() or []):
-                    if str(name).lower().endswith(CUMA_11013_METADATA_JSON_NAME):
-                        try:
-                            doc.embfile_del(name)
-                        except Exception:
-                            pass
-            if hasattr(doc, 'embfile_add'):
-                doc.embfile_add(CUMA_11013_METADATA_JSON_NAME, payload, filename=CUMA_11013_METADATA_JSON_NAME, desc='CUMA embedded metadata')
-        except Exception as exc:
-            _cuma_11013_log('Arquivo JSON embutido no PDF ignorado; metadados básicos mantidos', exc)
-        try:
-            doc.saveIncr()
+            save_kwargs['encryption'] = fitz.PDF_ENCRYPT_KEEP
         except Exception:
-            tmp = path.with_suffix(path.suffix + '.cuma_meta.tmp')
-            tmp.unlink(missing_ok=True)
-            doc.save(str(tmp), garbage=4, deflate=True)
-            doc.close()
-            doc = None
-            os.replace(str(tmp), str(path))
+            pass
+        doc.save(str(tmp), **save_kwargs)
+        doc.close()
+        doc = None
+        os.replace(str(tmp), str(path))
+        try:
+            os.chmod(path, old_mode)
+        except Exception:
+            pass
         return True
     except Exception as exc:
         _cuma_11013_log(f'Falha ao gravar metadados PDF: {path}', exc)
@@ -20210,6 +20529,10 @@ def _cuma_11013_write_pdf_metadata(path: Path, meta: dict) -> bool:
         try:
             if doc is not None:
                 doc.close()
+        except Exception:
+            pass
+        try:
+            tmp.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -20261,28 +20584,45 @@ def _cuma_11013_comicinfo_xml(meta: dict) -> str:
 
 
 def _cuma_11013_zip_rewrite_with_entries(path: Path, entries: dict[str, bytes | str]) -> bool:
+    """Regrava ZIP/EPUB/CBZ atomicamente e por streaming.
+
+    Usa o próprio ZipInfo ao ler, o que preserva corretamente arquivos duplicados
+    no ZIP e evita carregar entradas grandes inteiras na memória.
+    """
     path = Path(path)
     tmp = path.with_suffix(path.suffix + '.cuma_meta.tmp')
     tmp.unlink(missing_ok=True)
-    skip = {str(k) for k in entries.keys()}
+    normalized = {str(k): v for k, v in entries.items()}
+    skip = set(normalized)
     try:
-        with zipfile.ZipFile(path, 'r') as zin, zipfile.ZipFile(tmp, 'w') as zout:
+        with zipfile.ZipFile(path, 'r') as zin, zipfile.ZipFile(tmp, 'w', allowZip64=True) as zout:
+            zout.comment = zin.comment
+
+            # EPUB exige mimetype como primeira entrada e sem compressão.
+            if 'mimetype' in normalized:
+                data = normalized.pop('mimetype')
+                raw = data.encode('utf-8') if isinstance(data, str) else bytes(data)
+                zout.writestr('mimetype', raw, compress_type=zipfile.ZIP_STORED)
+
             for item in zin.infolist():
                 if item.filename in skip:
                     continue
-                try:
-                    data = zin.read(item.filename)
-                    zout.writestr(item, data)
-                except Exception:
-                    pass
-            for name, data in entries.items():
+                # Qualquer falha interrompe: poderia substituir o arquivo original por um ZIP incompleto.
+                with zin.open(item, 'r') as source, zout.open(item, 'w', force_zip64=True) as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+
+            for name, data in normalized.items():
                 raw = data.encode('utf-8') if isinstance(data, str) else bytes(data)
                 comp = zipfile.ZIP_STORED if name == 'mimetype' else zipfile.ZIP_DEFLATED
                 zout.writestr(name, raw, compress_type=comp)
+
         os.replace(str(tmp), str(path))
         return True
     except Exception as exc:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
         _cuma_11013_log(f'Falha ao regravar arquivo ZIP-like com metadados: {path}', exc)
         return False
 
@@ -20689,7 +21029,9 @@ def _cuma_11013_patch_crop_comboboxes(root_widget, app=None) -> None:
                     widget.configure(values=('Off', 'Suave', 'Normal', 'Forte'))
                     if app is not None and hasattr(app, 'cuma_auto_crop_strength'):
                         try:
-                            app.cuma_auto_crop_strength.set('Off')
+                            current = str(app.cuma_auto_crop_strength.get() or 'Off').title()
+                            if current not in {'Off', 'Suave', 'Normal', 'Forte'}:
+                                app.cuma_auto_crop_strength.set('Off')
                         except Exception:
                             pass
         except Exception:
@@ -20706,22 +21048,34 @@ def _cuma_11013_apply_safe_defaults(self) -> None:
             self.overwrite_original.set(False)
         if hasattr(self, 'cuma_reading_order'):
             self.cuma_reading_order.set('Ocidental')
-        if hasattr(self, 'cuma_auto_crop'):
-            self.cuma_auto_crop.set(False)
         if hasattr(self, 'cuma_auto_crop_strength'):
-            self.cuma_auto_crop_strength.set('Off')
+            try:
+                current_strength = str(self.cuma_auto_crop_strength.get() or 'Off').title()
+            except Exception:
+                current_strength = 'Off'
+            if current_strength not in {'Off', 'Suave', 'Normal', 'Forte'}:
+                current_strength = 'Off'
+                self.cuma_auto_crop_strength.set('Off')
+        else:
+            current_strength = 'Off'
+        if hasattr(self, 'cuma_auto_crop'):
+            try:
+                if current_strength == 'Off':
+                    self.cuma_auto_crop.set(False)
+            except Exception:
+                pass
         if hasattr(self, 'cuma_split_double_pages'):
             self.cuma_split_double_pages.set(True)
         if hasattr(self, 'cuma_split_keep_original'):
             self.cuma_split_keep_original.set(False)
         try:
             data = _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
-            data.update({
-                'reading_order': 'Ocidental',
-                'auto_crop': False,
-                'auto_crop_strength': 'Off',
-                'split_double_pages': True,
-            })
+            data['reading_order'] = 'Ocidental'
+            data.setdefault('auto_crop', False)
+            data.setdefault('auto_crop_strength', 'Off')
+            if str(data.get('auto_crop_strength') or 'Off').title() == 'Off':
+                data['auto_crop'] = False
+            data['split_double_pages'] = True
             if '_cuma_11000_save_processing_settings' in globals():
                 _cuma_11000_save_processing_settings(data)
         except Exception:
@@ -20962,7 +21316,16 @@ def _cuma_11013_app_processing_settings(self=None) -> dict:
         data = _cuma_11000_processing_settings() if '_cuma_11000_processing_settings' in globals() else {}
     if not isinstance(data, dict):
         data = {}
-    if str(data.get('auto_crop_strength') or '').lower() == 'off':
+    strength = str(data.get('auto_crop_strength') or 'Off').title()
+    if bool(data.get('auto_crop')) and strength == 'Off':
+        strength = 'Normal'
+        data['auto_crop_strength'] = strength
+        try:
+            if self is not None and hasattr(self, 'cuma_auto_crop_strength'):
+                self.cuma_auto_crop_strength.set(strength)
+        except Exception:
+            pass
+    elif strength == 'Off':
         data['auto_crop'] = False
     data.setdefault('reading_order', 'Ocidental')
     data.setdefault('auto_crop_strength', 'Off')
@@ -21001,6 +21364,12 @@ def _cuma_11013_pdf_clean(self, source: Path, output_pdf: Path, progress=None, c
         for out in outputs:
             if out.exists() and out.is_file() and _cuma_11013_supported_for_embedded_metadata(out):
                 _cuma_11013_embed_metadata_from_source(source, out)
+
+        # A incorporação de metadados pode alterar o tamanho final.
+        out_path = Path(getattr(result, 'output', '') or '')
+        if out_path.exists() and out_path.is_file():
+            result.final_size = int(out_path.stat().st_size)
+            result.saved_bytes = max(0, int(getattr(result, 'original_size', 0) or 0) - result.final_size)
     except Exception as exc:
         _cuma_11013_log('Metadados pós-Limpar ignorados', exc)
     return result
@@ -22722,53 +23091,21 @@ def ensure_manual() -> Path:
 
 
 def _cuma_11015_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        candidates = []
-        try:
-            candidates.append(app_dir() / '.cuma_user_data' / 'cuma_settings.json')
-        except Exception:
-            pass
-        try:
-            candidates.append(runtime_dir() / '.cuma_user_data' / 'cuma_settings.json')
-        except Exception:
-            pass
-        for path in candidates:
-            try:
-                if not path.exists():
-                    continue
-                data = json.loads(path.read_text(encoding='utf-8'))
-                if not isinstance(data, dict):
-                    continue
-                for section, fields in {
-                    'version_state': ('current_version',),
-                    'version_history': ('current_version',),
-                    'version': ('version',),
-                    'version_metadata': ('version', 'current_version'),
-                    'versioning': ('current_version',),
-                    'metadata_system': ('auto_volume_detection_version',),
-                }.items():
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        for field in fields:
-                            if field in item:
-                                item[field] = CUMA_11015_VERSION
-                for section in ('version_state', 'version_history'):
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        events = item.setdefault('events', [])
-                        if isinstance(events, list) and not any(isinstance(e, dict) and e.get('version') == CUMA_11015_VERSION for e in events):
-                            events.append({
-                                'version': CUMA_11015_VERSION,
-                                'base_version': item.get('base_version', '1.080.0'),
-                                'scale': 'revisao',
-                                'description': 'Revisão 1.100.15: versão interna alinhada, manuais revisados e auditoria executada.',
-                                'timestamp': datetime.now().isoformat(timespec='seconds'),
-                            })
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11015_VERSION
+        data['app_version'] = CUMA_11015_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11015_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11015_VERSION
+        cuma_settings_save(data)
     except Exception as exc:
-        _cuma_11015_log('Sincronização de versionamento 1.100.15', exc)
+        try:
+            _cuma_11015_log('Falha ao sincronizar arquivo de estado', exc)
+        except Exception:
+            pass
 
 
 def _cuma_11015_revision_apply() -> None:
@@ -22847,52 +23184,21 @@ def _cuma_11016_force_version() -> None:
 
 
 def _cuma_11016_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        candidates = []
-        for func_name in ('app_dir', 'runtime_dir'):
-            try:
-                func = globals().get(func_name)
-                if callable(func):
-                    candidates.append(func() / '.cuma_user_data' / 'cuma_settings.json')
-            except Exception:
-                pass
-        for path in candidates:
-            try:
-                if not path.exists():
-                    continue
-                data = json.loads(path.read_text(encoding='utf-8'))
-                if not isinstance(data, dict):
-                    continue
-                for section, fields in {
-                    'version_state': ('current_version',),
-                    'version_history': ('current_version',),
-                    'version': ('version',),
-                    'version_metadata': ('version', 'current_version'),
-                    'versioning': ('current_version',),
-                    'metadata_system': ('auto_volume_detection_version',),
-                }.items():
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        for field in fields:
-                            if field in item:
-                                item[field] = CUMA_11016_VERSION
-                for section in ('version_state', 'version_history'):
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        events = item.setdefault('events', [])
-                        if isinstance(events, list) and not any(isinstance(e, dict) and e.get('version') == CUMA_11016_VERSION for e in events):
-                            events.append({
-                                'version': CUMA_11016_VERSION,
-                                'base_version': item.get('base_version', '1.080.0'),
-                                'scale': 'correcao',
-                                'description': 'Correção 1.100.16: versão exibida travada na versão ativa após hooks antigos.',
-                                'timestamp': datetime.now().isoformat(timespec='seconds'),
-                            })
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11016_VERSION
+        data['app_version'] = CUMA_11016_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11016_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11016_VERSION
+        cuma_settings_save(data)
     except Exception as exc:
-        _cuma_11016_log('Falha ao sincronizar arquivo de estado', exc)
+        try:
+            _cuma_11016_log('Falha ao sincronizar arquivo de estado', exc)
+        except Exception:
+            pass
 
 
 def _cuma_11016_update_visible_titles(app=None) -> None:
@@ -23066,52 +23372,21 @@ def _cuma_11017_force_version(app=None) -> None:
 
 
 def _cuma_11017_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        candidates = []
-        for func_name in ('app_dir', 'runtime_dir'):
-            try:
-                func = globals().get(func_name)
-                if callable(func):
-                    candidates.append(func() / '.cuma_user_data' / 'cuma_settings.json')
-            except Exception:
-                pass
-        for path in candidates:
-            try:
-                if not path.exists():
-                    continue
-                data = json.loads(path.read_text(encoding='utf-8'))
-                if not isinstance(data, dict):
-                    continue
-                for section, fields in {
-                    'version_state': ('current_version',),
-                    'version_history': ('current_version',),
-                    'version': ('version',),
-                    'version_metadata': ('version', 'current_version'),
-                    'versioning': ('current_version',),
-                    'metadata_system': ('auto_volume_detection_version',),
-                }.items():
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        for field in fields:
-                            if field in item:
-                                item[field] = CUMA_11017_VERSION
-                for section in ('version_state', 'version_history'):
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        events = item.setdefault('events', [])
-                        if isinstance(events, list) and not any(isinstance(e, dict) and e.get('version') == CUMA_11017_VERSION for e in events):
-                            events.append({
-                                'version': CUMA_11017_VERSION,
-                                'base_version': item.get('base_version', '1.080.0'),
-                                'scale': 'recurso',
-                                'description': 'Metadados 1.100.17: capa editável por volume e XTCH/XTHC gravado no padrão XTCJS.',
-                                'timestamp': datetime.now().isoformat(timespec='seconds'),
-                            })
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11017_VERSION
+        data['app_version'] = CUMA_11017_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11017_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11017_VERSION
+        cuma_settings_save(data)
     except Exception as exc:
-        _cuma_11017_log('Falha ao sincronizar estado de versão', exc)
+        try:
+            _cuma_11017_log('Falha ao sincronizar arquivo de estado', exc)
+        except Exception:
+            pass
 
 
 def _cuma_11017_clamp_int(value, default: int = 1, min_value: int = 1, max_value: int | None = None) -> int:
@@ -23431,7 +23706,7 @@ def _cuma_11017_write_xtcjs_metadata(path: Path, meta: dict) -> bool:
             raise RuntimeError('Nenhuma página encontrada no XTCH/XTHC.')
         meta = _cuma_11013_validate_metadata(meta, len(pages))
         rebuilt = _cuma_11017_build_xtcjs_file(pages, meta, bool(header.get('is2bit')))
-        tmp = path.with_suffix(path.suffix + '.cuma_meta.tmp')
+        tmp.unlink(missing_ok=True)
         tmp.write_bytes(rebuilt)
         os.replace(str(tmp), str(path))
         return True
@@ -23591,52 +23866,21 @@ def _cuma_11018_force_version(app=None) -> None:
 
 
 def _cuma_11018_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        candidates = []
-        for func_name in ('app_dir', 'runtime_dir'):
-            try:
-                func = globals().get(func_name)
-                if callable(func):
-                    candidates.append(func() / '.cuma_user_data' / 'cuma_settings.json')
-            except Exception:
-                pass
-        for path in candidates:
-            try:
-                if not path.exists():
-                    continue
-                data = json.loads(path.read_text(encoding='utf-8'))
-                if not isinstance(data, dict):
-                    continue
-                for section, fields in {
-                    'version_state': ('current_version',),
-                    'version_history': ('current_version',),
-                    'version': ('version',),
-                    'version_metadata': ('version', 'current_version'),
-                    'versioning': ('current_version',),
-                    'metadata_system': ('auto_volume_detection_version',),
-                }.items():
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        for field in fields:
-                            if field in item:
-                                item[field] = CUMA_11018_VERSION
-                for section in ('version_state', 'version_history'):
-                    item = data.get(section)
-                    if isinstance(item, dict):
-                        events = item.setdefault('events', [])
-                        if isinstance(events, list) and not any(isinstance(e, dict) and e.get('version') == CUMA_11018_VERSION for e in events):
-                            events.append({
-                                'version': CUMA_11018_VERSION,
-                                'base_version': item.get('base_version', '1.080.0'),
-                                'scale': 'correção',
-                                'description': 'Metadados 1.100.18: capa global do arquivo e XTCH/XTC revisado para compatibilidade xtcjs.',
-                                'timestamp': datetime.now().isoformat(timespec='seconds'),
-                            })
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11018_VERSION
+        data['app_version'] = CUMA_11018_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11018_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11018_VERSION
+        cuma_settings_save(data)
     except Exception as exc:
-        _cuma_11018_log('Falha ao sincronizar estado de versão', exc)
+        try:
+            _cuma_11018_log('Falha ao sincronizar arquivo de estado', exc)
+        except Exception:
+            pass
 
 
 def _cuma_11018_file_kind(path: Path) -> str:
@@ -24785,18 +25029,20 @@ def _cuma_11019_force_version(app=None) -> None:
 
 
 def _cuma_11019_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        path = Path('.cuma_user_data') / 'cuma_settings.json'
-        if path.exists():
-            data = json.loads(path.read_text(encoding='utf-8') or '{}')
-        else:
-            data = {}
-        data['last_version'] = CUMA_11019_VERSION
-        data['app_version'] = CUMA_11019_VERSION
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    except Exception:
-        pass
+        settings = cuma_settings_load(force=True)
+        if not isinstance(settings, dict):
+            settings = {}
+        settings['last_version'] = CUMA_11019_VERSION
+        settings['app_version'] = CUMA_11019_VERSION
+        settings.setdefault('version_state', {})['current_version'] = CUMA_11019_VERSION
+        cuma_settings_save(settings)
+    except Exception as exc:
+        try:
+            write_log(f'Falha ao sincronizar versão {CUMA_11019_VERSION}: {exc}')
+        except Exception:
+            pass
 
 
 def _cuma_11019_prepare_xtc_metadata(meta: dict | None, page_count: int) -> dict:
@@ -25099,33 +25345,21 @@ def _cuma_11020_force_version(app=None) -> None:
 
 
 def _cuma_11020_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        candidates = []
-        for func_name in ('app_dir', 'runtime_dir'):
-            try:
-                func = globals().get(func_name)
-                if callable(func):
-                    candidates.append(func() / '.cuma_user_data' / 'cuma_settings.json')
-            except Exception:
-                pass
-        candidates.append(Path('.cuma_user_data') / 'cuma_settings.json')
-        for path in candidates:
-            try:
-                if path.exists():
-                    data = json.loads(path.read_text(encoding='utf-8') or '{}')
-                    if not isinstance(data, dict):
-                        data = {}
-                else:
-                    data = {}
-                data['last_version'] = CUMA_11020_VERSION
-                data['app_version'] = CUMA_11020_VERSION
-                data.setdefault('version_state', {})['current_version'] = CUMA_11020_VERSION
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
-    except Exception:
-        pass
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11020_VERSION
+        data['app_version'] = CUMA_11020_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11020_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11020_VERSION
+        cuma_settings_save(data)
+    except Exception as exc:
+        try:
+            _cuma_11020_log('Falha ao sincronizar arquivo de estado', exc)
+        except Exception:
+            pass
 
 
 def _cuma_11020_read_c_string(data: bytes, offset: int, length: int) -> str:
@@ -25468,6 +25702,7 @@ def _cuma_11020_build_xtc_file(page_blobs: list[bytes], meta: dict, is2bit: bool
 
 def _cuma_11020_write_xtcjs_metadata(path: Path, meta: dict) -> bool:
     path = Path(path)
+    tmp = path.with_suffix(path.suffix + '.cuma_meta.tmp')
     try:
         data = path.read_bytes()
         header = _cuma_11020_xtc_parse_header(data)
@@ -25501,6 +25736,11 @@ def _cuma_11020_write_xtcjs_metadata(path: Path, meta: dict) -> bool:
     except Exception as exc:
         _cuma_11020_log(f'Falha ao gravar metadados XTC/XTCH/XTHC: {path}', exc)
         return False
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 _CUMA_11020_OLD_METADATA_FOR_SOURCE = globals().get('_cuma_11013_metadata_for_source')
@@ -26002,33 +26242,20 @@ def _cuma_11021_force_version(app=None) -> None:
 
 
 def _cuma_11021_sync_version_state_file() -> None:
+    """Evita cópias divergentes de cuma_settings.json em CWD/app_dir."""
     try:
-        candidates = []
-        for func_name in ('app_dir', 'runtime_dir'):
-            try:
-                func = globals().get(func_name)
-                if callable(func):
-                    candidates.append(func() / '.cuma_user_data' / 'cuma_settings.json')
-            except Exception:
-                pass
-        candidates.append(Path('.cuma_user_data') / 'cuma_settings.json')
-        for path in candidates:
-            try:
-                if path.exists():
-                    data = json.loads(path.read_text(encoding='utf-8') or '{}')
-                    if not isinstance(data, dict):
-                        data = {}
-                else:
-                    data = {}
-                data['last_version'] = CUMA_11021_VERSION
-                data['app_version'] = CUMA_11021_VERSION
-                data.setdefault('version_state', {})['current_version'] = CUMA_11021_VERSION
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
-    except Exception:
-        pass
+        settings = cuma_settings_load(force=True)
+        if not isinstance(settings, dict):
+            settings = {}
+        settings['last_version'] = CUMA_11021_VERSION
+        settings['app_version'] = CUMA_11021_VERSION
+        settings.setdefault('version_state', {})['current_version'] = CUMA_11021_VERSION
+        cuma_settings_save(settings)
+    except Exception as exc:
+        try:
+            write_log(f'Falha ao sincronizar versão {CUMA_11021_VERSION}: {exc}')
+        except Exception:
+            pass
 
 
 _CUMA_11021_OLD_FILE_KIND = globals().get('_cuma_11013_file_kind')
@@ -26992,44 +27219,23 @@ def _cuma_11024_set_title(app=None) -> None:
 
 
 def _cuma_11024_sync_version_state_file() -> None:
+    """Atualiza somente a configuração consolidada na pasta de dados do usuário."""
     try:
-        candidates = []
-        for func_name in ('user_settings_path', 'settings_path'):
-            fn = globals().get(func_name)
-            if callable(fn):
-                try:
-                    candidates.append(Path(fn()))
-                except Exception:
-                    pass
-        try:
-            candidates.append(app_dir() / '.cuma_user_data' / 'cuma_settings.json')
-        except Exception:
-            pass
-
-        for p in candidates:
-            try:
-                if not p:
-                    continue
-                p = Path(p)
-                if not p.exists():
-                    continue
-                data = json.loads(p.read_text(encoding='utf-8'))
-                if not isinstance(data, dict):
-                    continue
-                data['last_version'] = CUMA_11024_VERSION
-                data['app_version'] = CUMA_11024_VERSION
-                data.setdefault('versioning', {})['current_version'] = CUMA_11024_VERSION
-                data.setdefault('version_state', {})['current_version'] = CUMA_11024_VERSION
-                data.setdefault('version_history', {})['current_version'] = CUMA_11024_VERSION
-                data.setdefault('version', {})['name'] = 'CUMA'
-                data.setdefault('version', {})['version'] = CUMA_11024_VERSION
-                data.setdefault('version', {})['current_version'] = CUMA_11024_VERSION
-                data.setdefault('version_metadata', {})['name'] = 'CUMA'
-                data.setdefault('version_metadata', {})['version'] = CUMA_11024_VERSION
-                data.setdefault('version_metadata', {})['current_version'] = CUMA_11024_VERSION
-                p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            except Exception:
-                continue
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11024_VERSION
+        data['app_version'] = CUMA_11024_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11024_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11024_VERSION
+        data.setdefault('version_history', {})['current_version'] = CUMA_11024_VERSION
+        data.setdefault('version', {})['name'] = 'CUMA'
+        data['version']['version'] = CUMA_11024_VERSION
+        data['version']['current_version'] = CUMA_11024_VERSION
+        data.setdefault('version_metadata', {})['name'] = 'CUMA'
+        data['version_metadata']['version'] = CUMA_11024_VERSION
+        data['version_metadata']['current_version'] = CUMA_11024_VERSION
+        cuma_settings_save(data)
     except Exception as exc:
         _cuma_11024_log('Falha ao sincronizar arquivo de estado', exc)
 
@@ -27183,7 +27389,7 @@ _cuma_11024_install()
 # - log persistente do atualizador em CUMA_update.log;
 # - preparação para backup único/substituído pelo cuma_updater.py.
 
-CUMA_11025_VERSION = "1.100.30"
+CUMA_11025_VERSION = "1.100.35"
 CUMA_11025_DATE = "2026-06-25"
 
 
@@ -27270,39 +27476,21 @@ _CUMA_11025_OLD_WRITE_LOG = globals().get("write_log")
 
 
 def _cuma_11025_write_log(msg: str) -> None:
-    """Escreve o log geral com fallback seguro.
-
-    O arquivo principal continua sendo CUMA.log ao lado do executável/script.
-    Se essa pasta não permitir escrita, usa a pasta de dados do usuário.
-    """
+    """Escreve o log geral somente na pasta gravável de dados do usuário."""
     line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n"
-    targets = []
     try:
-        targets.append(app_dir() / "CUMA.log")
+        target = cuma_user_data_dir() / "CUMA.log"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8", errors="replace") as f:
+            f.write(line)
+        return
     except Exception:
         pass
     try:
-        fallback = cuma_user_data_dir() / "CUMA.log"
-        if fallback not in targets:
-            targets.append(fallback)
+        if callable(_CUMA_11025_OLD_WRITE_LOG):
+            _CUMA_11025_OLD_WRITE_LOG(str(msg))
     except Exception:
         pass
-    wrote = False
-    for path in targets:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8", errors="replace") as f:
-                f.write(line)
-            wrote = True
-            break
-        except Exception:
-            continue
-    if not wrote:
-        try:
-            if callable(_CUMA_11025_OLD_WRITE_LOG):
-                _CUMA_11025_OLD_WRITE_LOG(str(msg))
-        except Exception:
-            pass
 
 
 def _cuma_11025_log_startup_once() -> None:
@@ -27500,7 +27688,7 @@ def _cuma_11025_install() -> None:
             pass
     except Exception as exc:
         try:
-            _cuma_11025_write_log(f"Falha ao instalar camada 1.100.30: {exc}")
+            _cuma_11025_write_log(f"Falha ao instalar camada {globals().get('APP_DISPLAY_VERSION', CUMA_11026_VERSION)}: {exc}")
         except Exception:
             pass
 
@@ -27517,7 +27705,7 @@ _cuma_11025_install()
 # - comando do atualizador compatível com Windows, Linux e macOS;
 # - diagnóstico de empacotamento autocontido.
 
-CUMA_11026_VERSION = "1.100.30"
+CUMA_11026_VERSION = "1.100.35"
 CUMA_11026_DATE = "2026-06-26"
 
 
@@ -27735,7 +27923,7 @@ def _cuma_11026_install() -> None:
             pass
     except Exception as exc:
         try:
-            write_log(f"Falha ao instalar camada 1.100.30: {exc}")
+            write_log(f"Falha ao instalar camada {globals().get('APP_DISPLAY_VERSION', CUMA_11026_VERSION)}: {exc}")
         except Exception:
             pass
 
@@ -27758,13 +27946,13 @@ _cuma_11026_install()
 #   1.100.30 antes da interface abrir.
 # - O cartão visual "Versão" é atualizado após a construção da interface.
 
-CUMA_11027_VERSION = "1.100.30"
+CUMA_11027_VERSION = "1.100.35"
 CUMA_11027_DATE = "2026-06-27"
 
 
 def _cuma_11027_log(message: str, exc: Exception | None = None) -> None:
     try:
-        full = f"[1.100.30] {message}"
+        full = f"[{globals().get('APP_DISPLAY_VERSION', CUMA_11027_VERSION)}] {message}"
         if exc is not None:
             full += f": {exc.__class__.__name__}: {exc}"
         write_log(full)
@@ -27857,43 +28045,21 @@ def _cuma_11027_fix_visual_version(app=None) -> None:
 
 
 def _cuma_11027_sync_version_state_file() -> None:
+    """Sincroniza a versão somente no arquivo consolidado de dados do usuário."""
     try:
-        candidates = []
-        for func_name in ("user_settings_path", "settings_path"):
-            fn = globals().get(func_name)
-            if callable(fn):
-                try:
-                    candidates.append(Path(fn()))
-                except Exception:
-                    pass
+        data = cuma_settings_load(force=True)
+        if not isinstance(data, dict):
+            data = {}
+        data['last_version'] = CUMA_11027_VERSION
+        data['app_version'] = CUMA_11027_VERSION
+        data.setdefault('version_state', {})['current_version'] = CUMA_11027_VERSION
+        data.setdefault('versioning', {})['current_version'] = CUMA_11027_VERSION
+        cuma_settings_save(data)
+    except Exception as exc:
         try:
-            candidates.append(app_dir() / ".cuma_user_data" / "cuma_settings.json")
+            _cuma_11027_log('Falha ao sincronizar arquivo de estado', exc)
         except Exception:
             pass
-
-        for p in candidates:
-            try:
-                p = Path(p)
-                if not p.exists():
-                    continue
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    continue
-                data["last_version"] = CUMA_11027_VERSION
-                data["app_version"] = CUMA_11027_VERSION
-                data.setdefault("versioning", {})["current_version"] = CUMA_11027_VERSION
-                data.setdefault("version_state", {})["current_version"] = CUMA_11027_VERSION
-                data.setdefault("version", {})["name"] = "CUMA"
-                data.setdefault("version", {})["version"] = CUMA_11027_VERSION
-                data.setdefault("version", {})["current_version"] = CUMA_11027_VERSION
-                data.setdefault("version_metadata", {})["name"] = "CUMA"
-                data.setdefault("version_metadata", {})["version"] = CUMA_11027_VERSION
-                data.setdefault("version_metadata", {})["current_version"] = CUMA_11027_VERSION
-                p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                continue
-    except Exception as exc:
-        _cuma_11027_log("Falha ao sincronizar arquivo de versão", exc)
 
 
 _CUMA_11027_OLD_SETUP_VARS = getattr(App, "setup_vars", None)
@@ -27974,11 +28140,11 @@ def _cuma_11027_install() -> None:
         App.poll = _cuma_11027_poll
 
         try:
-            write_log("CUMA 1.100.30 camada de versionamento visual instalada.")
+            write_log(f"CUMA {globals().get('APP_DISPLAY_VERSION', CUMA_11027_VERSION)} camada de versionamento visual instalada.")
         except Exception:
             pass
     except Exception as exc:
-        _cuma_11027_log("Falha ao instalar camada 1.100.30", exc)
+        _cuma_11027_log(f"Falha ao instalar camada {globals().get('APP_DISPLAY_VERSION', CUMA_11027_VERSION)}", exc)
 
 
 _cuma_11027_install()
@@ -27989,7 +28155,7 @@ _cuma_11027_install()
 # =============================================================================
 # CUMA 1.100.30 - LIMPEZA DE PACOTE E GARANTIA FINAL DE VERSIONAMENTO
 # =============================================================================
-CUMA_11029_VERSION = "1.100.30"
+CUMA_11029_VERSION = "1.100.35"
 CUMA_11029_DATE = "2026-06-30"
 
 def _cuma_11029_apply_globals() -> None:
@@ -28088,7 +28254,7 @@ def _cuma_11029_install() -> None:
         App.apply_theme = _cuma_11029_apply_theme
         App.show_page = _cuma_11029_show_page
         try:
-            write_log("CUMA 1.100.30 camada final de versionamento/estrutura instalada.")
+            write_log(f"CUMA {globals().get('APP_DISPLAY_VERSION', CUMA_11029_VERSION)} camada final de versionamento/estrutura instalada.")
         except Exception:
             pass
     except Exception:
@@ -28096,6 +28262,1606 @@ def _cuma_11029_install() -> None:
 
 _cuma_11029_install()
 
+# =============================================================================
+# CUMA 1.100.35 - REMOÇÃO DINÂMICA DE BORDAS E REVISÃO DE EXECUÇÃO
+# =============================================================================
+CUMA_11031_VERSION = "1.100.35"
+CUMA_11031_DATE = "2026-07-05"
 
-if __name__ == '__main__':
+
+def _cuma_11031_apply_globals() -> None:
+    globals()["APP_NAME"] = "CUMA"
+    globals()["APP_DISPLAY_NAME"] = "CUMA"
+    globals()["APP_DISPLAY_VERSION"] = CUMA_11031_VERSION
+    globals()["APP_VERSION"] = f"{CUMA_11031_VERSION} CUMA"
+    globals()["CUMA_CONVERTER_DEVICE_UPDATE_VERSION"] = CUMA_11031_VERSION
+    globals()["APP_SUBTITLE"] = ""
+    for name in list(globals().keys()):
+        if re.fullmatch(r"CUMA_11\d{3}_VERSION", str(name)):
+            globals()[name] = CUMA_11031_VERSION
+
+
+def _cuma_11031_fix_visual(app=None) -> None:
+    try:
+        _cuma_11031_apply_globals()
+        root_obj = getattr(app, "root", None) if app is not None else None
+        if root_obj is not None and hasattr(root_obj, "title"):
+            root_obj.title("CUMA")
+        if app is not None:
+            for attr in ("version_label", "app_version_var", "display_version_var"):
+                value = getattr(app, attr, None)
+                try:
+                    if hasattr(value, "set"):
+                        value.set(CUMA_11031_VERSION)
+                    elif hasattr(value, "configure"):
+                        value.configure(text=CUMA_11031_VERSION)
+                except Exception:
+                    pass
+    except Exception as exc:
+        try:
+            write_log(f"[1.100.35] Falha ao alinhar versão visual: {exc}")
+        except Exception:
+            pass
+
+
+_CUMA_11031_OLD_SETUP_VARS = getattr(App, "setup_vars", None)
+def _cuma_11031_setup_vars(self, *args, **kwargs):
+    result = _CUMA_11031_OLD_SETUP_VARS(self, *args, **kwargs) if callable(_CUMA_11031_OLD_SETUP_VARS) else None
+    _cuma_11031_fix_visual(self)
+    return result
+
+
+_CUMA_11031_OLD_BUILD = getattr(App, "build", None)
+def _cuma_11031_build(self, *args, **kwargs):
+    result = _CUMA_11031_OLD_BUILD(self, *args, **kwargs) if callable(_CUMA_11031_OLD_BUILD) else None
+    _cuma_11031_fix_visual(self)
+    try:
+        write_log("CUMA 1.100.35: remoção dinâmica de bordas e scripts de execução carregados.")
+    except Exception:
+        pass
+    return result
+
+
+def _cuma_11031_install() -> None:
+    _cuma_11031_apply_globals()
+    globals()["_cuma_11013_version_apply"] = _cuma_11031_apply_globals
+    globals()["_cuma_11016_version_apply"] = _cuma_11031_apply_globals
+    globals()["cuma_version_apply_globals"] = lambda version=None: _cuma_11031_apply_globals()
+    App.setup_vars = _cuma_11031_setup_vars
+    App.build = _cuma_11031_build
+
+
+_cuma_11031_install()
+
+
+
+# =============================================================================
+# CUMA 1.100.35 - MIGRAÇÃO DE CAMINHOS, METADADOS E SEGURANÇA DE CORTE
+# =============================================================================
+CUMA_11034_VERSION = "1.100.35"
+CUMA_11034_DATE = "2026-07-06"
+_CUMA_11034_LOGGED_KEYS: set[str] = set()
+
+
+def _cuma_11034_log_once(key: str, message: str, exc: Exception | None = None) -> None:
+    """Registra uma ocorrência apenas uma vez por execução para evitar spam."""
+    token = str(key or message)
+    if token in _CUMA_11034_LOGGED_KEYS:
+        return
+    _CUMA_11034_LOGGED_KEYS.add(token)
+    try:
+        full = f"[CUMA {CUMA_11034_VERSION}] {message}"
+        if exc is not None:
+            full += f": {type(exc).__name__}: {exc}"
+        write_log(full)
+    except Exception:
+        pass
+
+
+def _cuma_11034_apply_globals() -> None:
+    globals()["APP_NAME"] = "CUMA"
+    globals()["APP_DISPLAY_NAME"] = "CUMA"
+    globals()["APP_DISPLAY_VERSION"] = CUMA_11034_VERSION
+    globals()["APP_VERSION"] = f"{CUMA_11034_VERSION} CUMA"
+    globals()["CUMA_CONVERTER_DEVICE_UPDATE_VERSION"] = CUMA_11034_VERSION
+    globals()["APP_SUBTITLE"] = ""
+    for name in list(globals().keys()):
+        if re.fullmatch(r"CUMA_11\d{3}_VERSION", str(name)):
+            globals()[name] = CUMA_11034_VERSION
+    try:
+        if isinstance(globals().get("CHANGELOG_LATEST"), dict):
+            globals()["CHANGELOG_LATEST"]["version"] = CUMA_11034_VERSION
+            globals()["CHANGELOG_LATEST"]["date"] = CUMA_11034_DATE
+    except Exception:
+        pass
+
+
+def _cuma_11034_current_output_root() -> Path:
+    """Raiz padrão da instalação atual, nunca de uma versão anterior."""
+    try:
+        return Path(runtime_dir()) / "limpos"
+    except Exception:
+        return Path.cwd() / "limpos"
+
+
+def _cuma_11034_normalized_path_text(value) -> str:
+    return str(value or "").strip().replace("\\", "/")
+
+
+def _cuma_11034_is_stale_install_path(value) -> bool:
+    """Detecta saídas gravadas dentro de instalações antigas do CUMA."""
+    raw = _cuma_11034_normalized_path_text(value)
+    if not raw:
+        return False
+    current_marker = f"/CUMA_{CUMA_11034_VERSION}/".lower()
+    low = "/" + raw.strip("/") + "/"
+    low = low.lower()
+
+    version_markers = re.findall(r"/cuma_(1\.\d+\.\d+)(?:-\d+)?/", low)
+    if version_markers and current_marker not in low:
+        return any(version != CUMA_11034_VERSION for version in version_markers)
+
+    # Estrutura anterior do pacote: .../GitHub/dist/CUMA_windows/...
+    if "/github/dist/cuma_windows/" in low and "/repositorio_github/" not in low:
+        return True
+    return False
+
+
+def _cuma_11034_map_old_output_path(value) -> Path:
+    """Mapeia .../limpos/<aba>/<arquivo> para a instalação atual."""
+    raw = _cuma_11034_normalized_path_text(value)
+    parts = [part for part in raw.split("/") if part]
+    lowered = [part.lower() for part in parts]
+    base = _cuma_11034_current_output_root()
+    if "limpos" in lowered:
+        index = len(lowered) - 1 - lowered[::-1].index("limpos")
+        remainder = parts[index + 1:]
+        return base.joinpath(*remainder) if remainder else base
+    return base / Path(raw).name
+
+
+def _cuma_11034_migrate_settings_paths() -> bool:
+    """Migra somente caminhos internos de instalações antigas; preserva pastas personalizadas."""
+    try:
+        data = cuma_settings_load(force=True)
+    except Exception as exc:
+        _cuma_11034_log_once("settings-load", "Falha ao carregar configurações para migração", exc)
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    base = _cuma_11034_current_output_root()
+    tabs = {
+        "output_dir": base / "Limpar",
+        "xteink_output_dir": base / "Converter",
+        "tools_output_dir": base / "Ferramentas",
+        "extract_output_dir": base / "Ferramentas",
+    }
+    changed = False
+
+    root_value = data.get("output_root")
+    if root_value and _cuma_11034_is_stale_install_path(root_value):
+        data["output_root"] = str(base)
+        changed = True
+
+    cfg = data.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+        data["config"] = cfg
+
+    for key, replacement in tabs.items():
+        value = cfg.get(key)
+        if value and _cuma_11034_is_stale_install_path(value):
+            cfg[key] = str(replacement)
+            changed = True
+
+    # Alguns builds antigos guardavam os mesmos caminhos no bloco runtime.
+    runtime = data.get("runtime")
+    if isinstance(runtime, dict):
+        for key, replacement in tabs.items():
+            value = runtime.get(key)
+            if value and _cuma_11034_is_stale_install_path(value):
+                runtime[key] = str(replacement)
+                changed = True
+
+    if changed:
+        try:
+            for folder in (base, base / "Limpar", base / "Converter", base / "Ferramentas"):
+                folder.mkdir(parents=True, exist_ok=True)
+            data["output_root"] = str(base)
+            cfg.setdefault("output_dir", str(base / "Limpar"))
+            cfg.setdefault("xteink_output_dir", str(base / "Converter"))
+            data.setdefault("versioning", {})["current_version"] = CUMA_11034_VERSION
+            cuma_settings_save(data)
+            _cuma_11034_log_once(
+                "settings-migrated",
+                f"Caminhos de uma instalação antiga foram migrados para {base}",
+            )
+        except Exception as exc:
+            _cuma_11034_log_once("settings-save", "Falha ao salvar caminhos migrados", exc)
+            return False
+    return changed
+
+
+def _cuma_11034_candidate_roots(app=None) -> list[Path]:
+    roots: list[Path] = []
+
+    def add(value) -> None:
+        try:
+            if hasattr(value, "get"):
+                value = value.get()
+            if not value:
+                return
+            p = Path(value).expanduser()
+            if _cuma_11034_is_stale_install_path(p):
+                return
+            if p.name in ("Limpar", "Converter", "Ferramentas"):
+                p = p.parent
+            key = os.path.normcase(os.path.abspath(str(p)))
+            if not any(os.path.normcase(os.path.abspath(str(x))) == key for x in roots):
+                roots.append(p)
+        except Exception:
+            pass
+
+    add(_cuma_11034_current_output_root())
+    try:
+        add(runtime_dir() / "limpos")
+    except Exception:
+        pass
+
+    if app is not None:
+        for attr in ("output_dir", "xteink_output_dir", "tools_output_dir"):
+            add(getattr(app, attr, None))
+        try:
+            cfg = getattr(app, "cfg", None)
+            for attr in ("output_dir", "xteink_output_dir"):
+                add(getattr(cfg, attr, None))
+        except Exception:
+            pass
+
+    try:
+        data = cuma_settings_load()
+        if isinstance(data, dict):
+            add(data.get("output_root"))
+            cfg = data.get("config") if isinstance(data.get("config"), dict) else {}
+            for key in ("output_dir", "xteink_output_dir", "tools_output_dir"):
+                add(cfg.get(key))
+    except Exception:
+        pass
+    return roots
+
+
+def _cuma_11034_resolve_existing_path(value, app=None) -> Path | None:
+    """Resolve caminhos atuais e migra referências antigas pelo nome/posição relativa."""
+    if value is None:
+        return None
+    try:
+        original = Path(value).expanduser()
+    except Exception:
+        return None
+    stale = _cuma_11034_is_stale_install_path(original)
+    if not stale:
+        try:
+            if original.exists() and original.is_file():
+                return original
+        except Exception:
+            pass
+
+    candidates: list[Path] = []
+    if stale:
+        candidates.append(_cuma_11034_map_old_output_path(original))
+        # Mantém o arquivo antigo apenas como último recurso, caso ainda exista.
+        try:
+            if original.exists() and original.is_file():
+                candidates.append(original)
+        except Exception:
+            pass
+
+    filename = original.name
+    for root in _cuma_11034_candidate_roots(app):
+        candidates.extend([
+            root / filename,
+            root / "Limpar" / filename,
+            root / "Converter" / filename,
+            root / "Ferramentas" / filename,
+        ])
+
+    # Arquivos já válidos nas filas têm prioridade sobre buscas por pasta.
+    if app is not None:
+        for attr in ("files", "xteink_files", "tools_extract_files", "tools_create_files"):
+            for item in list(getattr(app, attr, []) or []):
+                try:
+                    p = Path(item)
+                    if p.name == filename and p.exists() and p.is_file():
+                        candidates.insert(0, p)
+                except Exception:
+                    continue
+
+    seen: set[str] = set()
+    valid: list[Path] = []
+    for candidate in candidates:
+        try:
+            key = os.path.normcase(os.path.abspath(str(candidate)))
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.exists() and candidate.is_file():
+                valid.append(candidate)
+        except Exception:
+            continue
+    if not valid:
+        return None
+    try:
+        return max(valid, key=lambda p: p.stat().st_mtime)
+    except Exception:
+        return valid[0]
+
+
+def _cuma_11034_sanitize_converter_queue(app) -> tuple[int, int]:
+    """Substitui caminhos antigos resolvíveis e remove referências inexistentes."""
+    old_items = list(getattr(app, "xteink_files", []) or [])
+    new_items: list[Path] = []
+    replaced = 0
+    removed = 0
+    seen: set[str] = set()
+
+    for item in old_items:
+        resolved = _cuma_11034_resolve_existing_path(item, app)
+        if resolved is None:
+            removed += 1
+            continue
+        key = os.path.normcase(os.path.abspath(str(resolved)))
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        new_items.append(resolved)
+        if os.path.normcase(os.path.abspath(str(item))) != key:
+            replaced += 1
+
+    if replaced or removed:
+        app.xteink_files = new_items
+        tree = getattr(app, "xteink_tree", None)
+        if tree is not None:
+            try:
+                for child in tree.get_children(""):
+                    tree.delete(child)
+                for p in new_items:
+                    iid = _cuma_11008_path_key(p)
+                    kind_fn = globals().get("_cuma_11001_kind_for_path")
+                    kind = kind_fn(p) if callable(kind_fn) else p.suffix.lower().lstrip(".")
+                    type_text = {
+                        "pdf": "PDF",
+                        "epub": "EPUB",
+                        "archive": p.suffix.upper().lstrip("."),
+                        "image": "IMG",
+                        "xtch": "XTCH",
+                    }.get(kind, p.suffix.upper().lstrip("."))
+                    tree.insert("", "end", iid=iid, values=(p.name, "Aguardando", type_text, "", ""))
+                if new_items:
+                    first_iid = _cuma_11008_path_key(new_items[0])
+                    tree.selection_set(first_iid)
+                    tree.focus(first_iid)
+            except Exception as exc:
+                _cuma_11034_log_once("queue-tree-rebuild", "Falha ao reconstruir lista Converter", exc)
+        try:
+            value = str(new_items[0]) if new_items else ""
+            if hasattr(app, "xteink_input"):
+                app.xteink_input.set(value)
+            if hasattr(app, "update_xteink_counter"):
+                app.update_xteink_counter()
+        except Exception:
+            pass
+        _cuma_11034_log_once(
+            "queue-sanitized",
+            f"Fila Converter corrigida: {replaced} caminho(s) migrado(s), {removed} referência(s) removida(s).",
+        )
+    return replaced, removed
+
+
+def _cuma_11034_active_clean_path(app) -> Path | None:
+    candidates = []
+    try:
+        if hasattr(app, "selected_paths"):
+            candidates.extend(app.selected_paths() or [])
+    except Exception:
+        pass
+    candidates.extend(list(getattr(app, "files", []) or []))
+    for value in candidates:
+        resolved = _cuma_11034_resolve_existing_path(value, app)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _cuma_11034_active_converter_path(app) -> Path | None:
+    _cuma_11034_sanitize_converter_queue(app)
+    tree = getattr(app, "xteink_tree", None)
+    if tree is not None:
+        try:
+            selected = list(tree.selection())
+            if selected:
+                selected_key = selected[0]
+                for value in list(getattr(app, "xteink_files", []) or []):
+                    if _cuma_11008_path_key(value) == selected_key:
+                        resolved = _cuma_11034_resolve_existing_path(value, app)
+                        if resolved is not None:
+                            return resolved
+        except Exception:
+            pass
+    try:
+        current = getattr(app, "xteink_input", None)
+        if hasattr(current, "get"):
+            resolved = _cuma_11034_resolve_existing_path(current.get(), app)
+            if resolved is not None:
+                return resolved
+    except Exception:
+        pass
+    for value in list(getattr(app, "xteink_files", []) or []):
+        resolved = _cuma_11034_resolve_existing_path(value, app)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _cuma_11034_active_metadata_path(app) -> Path | None:
+    label = str(getattr(app, "_current_tab_label", "") or "")
+    if label == "Converter":
+        return _cuma_11034_active_converter_path(app) or _cuma_11034_active_clean_path(app)
+    if label == "Limpar":
+        return _cuma_11034_active_clean_path(app) or _cuma_11034_active_converter_path(app)
+    return _cuma_11034_active_clean_path(app) or _cuma_11034_active_converter_path(app)
+
+
+_CUMA_11034_OLD_PAGE_COUNT = (
+    globals().get("_cuma_11021_page_count")
+    or globals().get("_cuma_11018_page_count")
+    or globals().get("_cuma_11013_page_count")
+)
+
+
+def _cuma_11034_page_count(path: Path, app=None) -> int:
+    resolved = _cuma_11034_resolve_existing_path(path, app)
+    if resolved is None:
+        _cuma_11034_log_once(
+            f"page-count-missing:{path}",
+            f"Contagem ignorada: arquivo não existe mais: {path}",
+        )
+        return 0
+    try:
+        return int(_CUMA_11034_OLD_PAGE_COUNT(resolved) or 0) if callable(_CUMA_11034_OLD_PAGE_COUNT) else 0
+    except Exception as exc:
+        _cuma_11034_log_once(
+            f"page-count-error:{resolved}",
+            f"Falha ao contar páginas de {resolved}",
+            exc,
+        )
+        return 0
+
+
+_CUMA_11034_OLD_RENDER_PREVIEW = globals().get("_cuma_11015_render_page_preview_image")
+
+
+def _cuma_11034_render_page_preview_image(path, page_no, width=360, max_height=560):
+    resolved = _cuma_11034_resolve_existing_path(path)
+    if resolved is None:
+        _cuma_11034_log_once(
+            f"preview-missing:{path}",
+            f"Prévia ignorada: arquivo não existe mais: {path}",
+        )
+        return None
+    try:
+        if callable(_CUMA_11034_OLD_RENDER_PREVIEW):
+            return _CUMA_11034_OLD_RENDER_PREVIEW(resolved, page_no, width, max_height)
+    except Exception as exc:
+        _cuma_11034_log_once(
+            f"preview-error:{resolved}",
+            f"Falha ao renderizar prévia de metadados: {resolved}",
+            exc,
+        )
+    return None
+
+
+_CUMA_11034_OLD_OPEN_METADATA = getattr(App, "open_cuma_metadata_editor", None)
+
+
+def _cuma_11034_open_metadata_editor(self) -> None:
+    _cuma_11034_sanitize_converter_queue(self)
+    path = _cuma_11034_active_metadata_path(self)
+    if path is None or not path.exists():
+        _cuma_11034_log_once("metadata-no-file", "Editor de metadados aberto sem arquivo válido.")
+        try:
+            messagebox.showwarning(
+                "Metadados",
+                "O arquivo selecionado não existe mais.\n"
+                "A referência antiga foi removida. Adicione ou selecione novamente o arquivo atual.",
+            )
+        except Exception:
+            pass
+        return
+    if callable(_CUMA_11034_OLD_OPEN_METADATA):
+        return _CUMA_11034_OLD_OPEN_METADATA(self)
+
+
+_CUMA_11034_OLD_SETUP_VARS = getattr(App, "setup_vars", None)
+_CUMA_11034_OLD_BUILD = getattr(App, "build", None)
+_CUMA_11034_OLD_SHOW_PAGE = getattr(App, "show_page", None)
+_CUMA_11034_OLD_SAVE_CONFIG = getattr(App, "save_current_config", None)
+
+
+def _cuma_11034_setup_vars(self, *args, **kwargs):
+    _cuma_11034_apply_globals()
+    _cuma_11034_migrate_settings_paths()
+    result = _CUMA_11034_OLD_SETUP_VARS(self, *args, **kwargs) if callable(_CUMA_11034_OLD_SETUP_VARS) else None
+    _cuma_11034_apply_globals()
+    return result
+
+
+def _cuma_11034_build(self, *args, **kwargs):
+    _cuma_11034_apply_globals()
+    result = _CUMA_11034_OLD_BUILD(self, *args, **kwargs) if callable(_CUMA_11034_OLD_BUILD) else None
+    _cuma_11034_sanitize_converter_queue(self)
+    try:
+        self.root.title("CUMA")
+    except Exception:
+        pass
+    _cuma_11034_apply_globals()
+    return result
+
+
+def _cuma_11034_show_page(self, label, save_state=True):
+    if str(label or "") == "Converter":
+        _cuma_11034_sanitize_converter_queue(self)
+    result = _CUMA_11034_OLD_SHOW_PAGE(self, label, save_state) if callable(_CUMA_11034_OLD_SHOW_PAGE) else None
+    if str(label or "") == "Converter":
+        _cuma_11034_sanitize_converter_queue(self)
+    return result
+
+
+def _cuma_11034_save_current_config(self, *args, **kwargs):
+    result = _CUMA_11034_OLD_SAVE_CONFIG(self, *args, **kwargs) if callable(_CUMA_11034_OLD_SAVE_CONFIG) else None
+    _cuma_11034_migrate_settings_paths()
+    return result
+
+
+def _cuma_11034_install() -> None:
+    _cuma_11034_apply_globals()
+
+    globals()["_cuma_11013_active_clean_path"] = _cuma_11034_active_clean_path
+    globals()["_cuma_11013_active_converter_path"] = _cuma_11034_active_converter_path
+    globals()["_cuma_11013_active_metadata_path"] = _cuma_11034_active_metadata_path
+    globals()["_cuma_11002_selected_converter_path"] = _cuma_11034_active_converter_path
+
+    for name in ("_cuma_11013_page_count", "_cuma_11018_page_count", "_cuma_11021_page_count"):
+        globals()[name] = _cuma_11034_page_count
+    globals()["_cuma_11015_render_page_preview_image"] = _cuma_11034_render_page_preview_image
+
+    globals()["_cuma_11013_version_apply"] = _cuma_11034_apply_globals
+    globals()["_cuma_11016_version_apply"] = _cuma_11034_apply_globals
+    globals()["cuma_version_apply_globals"] = lambda version=None: _cuma_11034_apply_globals()
+
+    App.open_cuma_metadata_editor = _cuma_11034_open_metadata_editor
+    App.setup_vars = _cuma_11034_setup_vars
+    App.build = _cuma_11034_build
+    App.show_page = _cuma_11034_show_page
+    App.save_current_config = _cuma_11034_save_current_config
+
+    try:
+        write_log(
+            f"CUMA {CUMA_11034_VERSION}: caminhos antigos, metadados, logs e corte dinâmico revisados."
+        )
+    except Exception:
+        pass
+
+
+_cuma_11034_install()
+
+
+# =============================================================================
+# CUMA 1.100.35 — auditoria integral, metadados confiáveis e segurança
+# =============================================================================
+CUMA_11035_VERSION = "1.100.36"
+CUMA_11035_DATE = "2026-07-06"
+
+
+def _cuma_11035_log(message: str, exc: Exception | None = None) -> None:
+    try:
+        write_log(message)
+    except Exception:
+        pass
+    if exc is not None:
+        try:
+            write_error_log(message, exc)
+        except Exception:
+            pass
+
+
+def _cuma_11035_apply_globals() -> None:
+    """Mantém toda apresentação/versionamento apontando para a versão ativa."""
+    global APP_VERSION, APP_DISPLAY_VERSION, APP_DISPLAY_NAME
+    global CUMA_CONVERTER_DEVICE_UPDATE_VERSION, CHANGELOG_LATEST
+    APP_VERSION = f"{CUMA_11035_VERSION} CUMA"
+    APP_DISPLAY_VERSION = CUMA_11035_VERSION
+    APP_DISPLAY_NAME = "CUMA"
+    CUMA_CONVERTER_DEVICE_UPDATE_VERSION = CUMA_11035_VERSION
+    CHANGELOG_LATEST = (
+        "Auditoria integral: metadados preservados em PDFs pequenos, troca atômica "
+        "de arquivos, updater protegido e versionamento visual unificado."
+    )
+    for name in list(globals()):
+        if re.fullmatch(r"CUMA_11\d{3}_VERSION", str(name)):
+            globals()[name] = CUMA_11035_VERSION
+
+
+def _cuma_11035_sync_version_state() -> None:
+    """Atualiza somente campos ativos de versão, preservando histórico do usuário."""
+    try:
+        data = cuma_settings_load()
+        if not isinstance(data, dict):
+            return
+        state = data.get("version_state")
+        if not isinstance(state, dict):
+            state = {}
+        state["current_version"] = CUMA_11035_VERSION
+        state.setdefault("base_version", CUMA_VERSION_BASE)
+        data["version_state"] = state
+
+        history = data.get("version_history")
+        if not isinstance(history, dict):
+            history = {}
+        history["current_version"] = CUMA_11035_VERSION
+        history.setdefault("base_version", CUMA_VERSION_BASE)
+        data["version_history"] = history
+
+        version_payload = data.get("version")
+        if not isinstance(version_payload, dict):
+            version_payload = {}
+        version_payload["current_version"] = CUMA_11035_VERSION
+        version_payload["version"] = CUMA_11035_VERSION
+        version_payload["display_version"] = CUMA_11035_VERSION
+        version_payload["app_version"] = f"{CUMA_11035_VERSION} CUMA"
+        data["version"] = version_payload
+
+        versioning = data.get("versioning")
+        if not isinstance(versioning, dict):
+            versioning = {}
+        versioning["current_version"] = CUMA_11035_VERSION
+        data["versioning"] = versioning
+
+        metadata_system = data.get("metadata_system")
+        if isinstance(metadata_system, dict):
+            metadata_system["auto_volume_detection_version"] = CUMA_11035_VERSION
+
+        cuma_settings_save(data)
+    except Exception as exc:
+        _cuma_11035_log("Falha ao sincronizar estado de versão 1.100.35", exc)
+
+
+def cuma_version_debug_snapshot() -> dict:
+    """Snapshot baseado na versão e no armazenamento realmente ativos."""
+    events_count = 0
+    try:
+        state = cuma_version_load_state()
+        if isinstance(state, dict) and isinstance(state.get("events"), list):
+            events_count = len(state["events"])
+    except Exception:
+        pass
+    settings_file = cuma_settings_path()
+    return {
+        "current_version": CUMA_11035_VERSION,
+        "base_version": CUMA_VERSION_BASE,
+        "schema": CUMA_VERSION_SCHEMA,
+        "events_count": events_count,
+        "settings_file": str(settings_file),
+        "state_file": str(settings_file),
+        "history_file": str(settings_file),
+    }
+
+
+def _cuma_11035_detect_volume_starts(
+    path: str | Path,
+    total_pages: int | None = None,
+    force_visual: bool = True,
+) -> dict:
+    """Lê fontes confiáveis em qualquer tamanho; heurística visual só em PDFs grandes."""
+    p = Path(path)
+    total = int(total_pages if total_pages is not None else _cuma_11013_page_count(p) or 0)
+    result = {
+        "starts": [1],
+        "method": "single_volume_default",
+        "confidence": 0.0,
+        "messages": [],
+        "analyzed_pages": total,
+    }
+    if not p.exists() or p.suffix.lower() != ".pdf" or total <= 0:
+        result["messages"].append("Arquivo ausente, vazio ou não compatível com detecção PDF.")
+        return result
+
+    doc = None
+    try:
+        doc = fitz.open(str(p))
+
+        # Bookmarks com título explícito de volume são uma fonte autoritativa.
+        # Não aplicamos a distância mínima da heurística visual, pois um PDF
+        # pequeno de teste ou uma amostra também pode ter vários volumes válidos.
+        try:
+            toc_hits = []
+            rx_volume = _cuma_11014_volume_title_regex()
+            for item in doc.get_toc(simple=True) or []:
+                try:
+                    title = str(item[1] or "")
+                    page_no = int(item[2] or 0)
+                except Exception:
+                    continue
+                if 1 <= page_no <= total and rx_volume.search(title):
+                    toc_hits.append(page_no)
+            toc_hits = _cuma_11014_unique_sorted_pages(toc_hits, total, min_gap=1)
+            if len(toc_hits) >= 2:
+                result.update(
+                    starts=toc_hits,
+                    method="pdf_toc",
+                    confidence=0.99,
+                    messages=[f"TOC/bookmarks: {len(toc_hits)} volumes explícitos encontrados."],
+                )
+                return result
+        except Exception:
+            pass
+
+        trusted_sources = (
+            ("pdf_toc", 0.97, _cuma_11014_detect_from_toc),
+            ("pdf_page_labels", 0.96, _cuma_11015_detect_from_page_labels),
+            ("pdf_embedded_map", 0.96, _cuma_11015_detect_from_embedded_maps),
+            ("pdf_keywords_map", 0.93, _cuma_11015_detect_from_pdf_keywords),
+            ("pdf_text", 0.84, _cuma_11014_detect_from_text),
+        )
+        for method, confidence, detector in trusted_sources:
+            starts, messages = detector(doc, total)
+            if len(starts) >= 2:
+                result.update(
+                    starts=starts,
+                    method=method,
+                    confidence=confidence,
+                    messages=messages,
+                )
+                return result
+
+        # Arquivos pequenos continuam podendo ter bookmarks/metadados, mas não
+        # sofrem varredura visual pesada nem falsos positivos de páginas coloridas.
+        if total >= CUMA_11014_MIN_MULTI_VOLUME_PAGES and force_visual:
+            starts, messages = _cuma_11015_detect_from_visual(doc, total)
+            if len(starts) >= 2:
+                result.update(
+                    starts=starts,
+                    method="pdf_visual_safe_heuristic",
+                    confidence=0.58,
+                    messages=messages,
+                )
+                return result
+
+        if total < CUMA_11014_MIN_MULTI_VOLUME_PAGES:
+            result["messages"].append(
+                "PDF pequeno: bookmarks, mapas e texto foram validados; "
+                "a heurística visual de múltiplos volumes não foi necessária."
+            )
+        else:
+            result["messages"].append(
+                "Nenhum padrão confiável de múltiplos volumes foi encontrado; "
+                "capítulos e páginas coloridas isoladas foram ignorados."
+            )
+        return result
+    except Exception as exc:
+        result["messages"].append(f"Falha na detecção automática: {type(exc).__name__}: {exc}")
+        _cuma_11035_log(f"Falha ao detectar volumes em {p}", exc)
+        return result
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+
+
+def _cuma_11035_read_pdf_metadata(path: Path) -> dict | None:
+    """Lê mapa CUMA/TOC mesmo em PDFs pequenos antes de criar volume genérico."""
+    path = Path(path)
+    doc = None
+    try:
+        doc = fitz.open(str(path))
+        total = len(doc)
+
+        # O mapa embutido pelo CUMA tem prioridade máxima.
+        try:
+            if hasattr(doc, "embfile_names"):
+                for embedded_name in list(doc.embfile_names() or []):
+                    if str(embedded_name).lower().endswith(CUMA_11013_METADATA_JSON_NAME):
+                        obj = _cuma_11013_metadata_from_bytes(doc.embfile_get(embedded_name))
+                        if obj:
+                            return _cuma_11013_validate_metadata(obj, total)
+        except Exception:
+            pass
+
+        pdf_metadata = doc.metadata or {}
+        for key in ("keywords", "subject"):
+            value = str(pdf_metadata.get(key) or "")
+            marker = "CUMA_METADATA_JSON="
+            if marker in value:
+                obj = _cuma_11013_metadata_from_bytes(value.split(marker, 1)[1].strip())
+                if obj:
+                    return _cuma_11013_validate_metadata(obj, total)
+
+        detected = _cuma_11035_detect_volume_starts(path, total, force_visual=False)
+        has_standard = any(pdf_metadata.get(k) for k in ("title", "author", "subject", "keywords"))
+        if len(detected.get("starts") or []) >= 2 or has_standard:
+            obj = _cuma_11013_default_metadata(path, total)
+            obj["title"] = pdf_metadata.get("title") or obj["title"]
+            obj["creator"] = pdf_metadata.get("author") or obj.get("creator", "")
+            obj["description"] = pdf_metadata.get("subject") or obj.get("description", "")
+            starts = list(detected.get("starts") or [1])
+            if len(starts) >= 2:
+                trusted_starts = sorted({max(1, min(total, int(value))) for value in starts})
+                obj["volumes"] = []
+                for index, start_page in enumerate(trusted_starts):
+                    end_page = (
+                        trusted_starts[index + 1] - 1
+                        if index + 1 < len(trusted_starts)
+                        else total
+                    )
+                    obj["volumes"].append({
+                        "volume": index + 1,
+                        "title": f"Volume {index + 1}",
+                        "start_page": start_page,
+                        "end_page": max(start_page, end_page),
+                        "cover_page": start_page,
+                    })
+                obj["mode"] = "multi_volume"
+            obj["validation"] = {
+                "status": "trusted_pdf_metadata",
+                "messages": list(detected.get("messages") or [])
+                + [f"Fonte usada: {detected.get('method') or 'standard_pdf_metadata'}."],
+            }
+            return _cuma_11013_validate_metadata(obj, total)
+    except Exception as exc:
+        _cuma_11035_log(f"Falha ao ler metadados PDF: {path}", exc)
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+    return None
+
+
+
+CUMA_11035_README = """CUMA 1.100.36
+
+Aplicativo para limpeza, organização, metadados e conversão de mangás.
+
+FUNÇÕES
+- Limpeza de PDF e remoção dinâmica de bordas.
+- Conversão entre PDF, EPUB, CBZ/imagens e XTC/XTCH/XTHC.
+- Metadados nas abas Limpar e Converter.
+- Atualizador externo com SHA256, backup único, rollback e log detalhado.
+- Builds autocontidos para Windows, Linux e macOS.
+
+LOGS
+- CUMA.log: execução geral.
+- erro.txt: erros detalhados.
+- CUMA_update.log: atualização.
+- CUMA_bootstrap.log: preparação local/build.
+
+Consulte manual_do_programa.txt.
+"""
+
+
+def _cuma_11035_write_readme() -> Path:
+    target = app_dir() / "LEIA-ME.txt"
+    try:
+        target.write_text(CUMA_11035_README, encoding="utf-8")
+    except Exception as exc:
+        _cuma_11035_log("Falha ao atualizar LEIA-ME 1.100.35", exc)
+    return target
+
+
+CUMA_11035_MANUAL_FALLBACK = """MANUAL COMPLETO DO CUMA
+Versão: 1.100.36
+
+O CUMA limpa PDFs, remove bordas dinamicamente, organiza metadados e converte
+PDF, EPUB, CBZ/imagens e XTC/XTCH/XTHC.
+
+Abas principais:
+- Limpar: processamento visual e saída em PDF/CBZ/imagens.
+- Converter: conversão sem repetir a limpeza.
+- Ferramentas: extração de páginas e criação de PDF.
+- Metadados: título, autor, série, idioma, capa global e volumes.
+- Opções: compactação, leitura, corte, divisão de páginas, logs e pastas.
+
+Segurança:
+- o arquivo original não é sobrescrito pelas opções normais;
+- metadados existentes são validados antes de nova detecção;
+- o updater valida SHA256, pacote, processo fechado, backup e rollback;
+- logs: CUMA.log, erro.txt, CUMA_update.log e CUMA_bootstrap.log.
+
+Build:
+- Windows: compilacao/Windows/criar_windows.bat
+- Linux: compilacao/Linux/criar_linux_tar.sh
+- macOS: compilacao/macOS/criar_macos_zip.sh
+"""
+
+
+def _cuma_11035_ensure_manual() -> Path:
+    """Preserva o manual completo e corrige somente versão/conteúdo obrigatório."""
+    target = manual_path()
+    try:
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    except Exception:
+        existing = ""
+
+    content = existing.strip() or CUMA_11035_MANUAL_FALLBACK.strip()
+    content = re.sub(
+        r"(Versão:\s*)1\.\d+\.\d+",
+        rf"\g<1>{CUMA_11035_VERSION}",
+        content,
+        count=1,
+    )
+    if not re.search(r"Versão:\s*1\.\d+\.\d+", content):
+        content = f"MANUAL COMPLETO DO CUMA\nVersão: {CUMA_11035_VERSION}\n\n" + content
+
+    audit_section = """
+===============================================================================
+ATUALIZAÇÃO 1.100.35 - AUDITORIA INTEGRAL
+===============================================================================
+- Metadados e bookmarks preservados também em PDFs pequenos.
+- Troca atômica de PDFs e regravação segura de ZIP/EPUB/CBZ.
+- Atualizador protegido contra caminhos maliciosos e cópias parciais.
+- Backup único substituído a cada atualização e rollback validado.
+- Builds Windows, Linux e macOS executam auditoria antes do PyInstaller.
+""".strip()
+    if "ATUALIZAÇÃO 1.100.35 - AUDITORIA INTEGRAL" not in content:
+        content = content.rstrip() + "\n\n" + audit_section + "\n"
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content.rstrip() + "\n", encoding="utf-8")
+    except Exception as exc:
+        _cuma_11035_log("Falha ao atualizar manual 1.100.35", exc)
+    return target
+
+
+_CUMA_11035_OLD_SETUP_VARS = getattr(App, "setup_vars", None)
+_CUMA_11035_OLD_BUILD = getattr(App, "build", None)
+
+
+def _cuma_11035_fix_visual(app=None) -> None:
+    _cuma_11035_apply_globals()
+    try:
+        if app is not None:
+            app.root.title("CUMA")
+    except Exception:
+        pass
+    try:
+        # Reutiliza a correção visual já testada, agora com todas as constantes
+        # históricas alinhadas pela função apply_globals.
+        _cuma_11027_fix_visual_version(app)
+    except Exception:
+        pass
+
+
+def _cuma_11035_setup_vars(self, *args, **kwargs):
+    _cuma_11035_apply_globals()
+    _cuma_11035_sync_version_state()
+    result = (
+        _CUMA_11035_OLD_SETUP_VARS(self, *args, **kwargs)
+        if callable(_CUMA_11035_OLD_SETUP_VARS)
+        else None
+    )
+    _cuma_11035_apply_globals()
+    return result
+
+
+def _cuma_11035_build(self, *args, **kwargs):
+    _cuma_11035_apply_globals()
+    result = (
+        _CUMA_11035_OLD_BUILD(self, *args, **kwargs)
+        if callable(_CUMA_11035_OLD_BUILD)
+        else None
+    )
+    _cuma_11035_fix_visual(self)
+    return result
+
+
+def _cuma_11035_install() -> None:
+    _cuma_11035_apply_globals()
+    _cuma_11035_sync_version_state()
+
+    globals()["_cuma_11014_detect_volume_starts"] = _cuma_11035_detect_volume_starts
+    globals()["_cuma_11015_detect_volume_starts"] = _cuma_11035_detect_volume_starts
+    globals()["_cuma_11013_read_pdf_metadata"] = _cuma_11035_read_pdf_metadata
+
+    # Mantém também os aliases públicos/legados apontando para os conversores
+    # finais que aplicam metadados após gerar o contêiner.
+    if callable(globals().get("_cuma_11000_create_xtch_from_pdf")):
+        globals()["create_xtch_from_pdf"] = globals()["_cuma_11000_create_xtch_from_pdf"]
+    if callable(globals().get("_cuma_11000_create_xtch_from_epub_stream")):
+        globals()["create_xtch_from_epub"] = globals()["_cuma_11000_create_xtch_from_epub_stream"]
+
+    globals()["ensure_manual"] = _cuma_11035_ensure_manual
+    globals()["CUMA_MANUAL_TEXT"] = CUMA_11035_MANUAL_FALLBACK
+    try:
+        _cuma_11035_ensure_manual()
+        _cuma_11035_write_readme()
+    except Exception:
+        pass
+
+    globals()["_cuma_11013_version_apply"] = _cuma_11035_apply_globals
+    globals()["_cuma_11016_version_apply"] = _cuma_11035_apply_globals
+    globals()["cuma_version_apply_globals"] = lambda version=None: _cuma_11035_apply_globals()
+
+    App.setup_vars = _cuma_11035_setup_vars
+    App.build = _cuma_11035_build
+
+    try:
+        write_log(
+            f"CUMA {CUMA_11035_VERSION}: auditoria integral instalada; "
+            "metadados, atualização, arquivos e versionamento validados."
+        )
+    except Exception:
+        pass
+
+
+_cuma_11035_install()
+
+
+# =============================================================================
+# CUMA 1.100.36 - remapeamento estrutural de capas/volumes após a limpeza
+# =============================================================================
+# Esta camada corrige o deslocamento de metadados quando páginas anteriores a
+# uma capa são removidas ou quando uma página dupla gera duas páginas de saída.
+
+CUMA_11036_VERSION = "1.100.37"
+CUMA_11036_UPDATE_ID = "volume_cover_page_remap_after_clean_11036"
+
+
+def _cuma_11036_log(message: str, exc: Exception | None = None) -> None:
+    try:
+        full = f"[CUMA {CUMA_11036_VERSION}] {message}"
+        if exc is not None:
+            full += f" - {type(exc).__name__}: {exc}"
+        write_log(full)
+    except Exception:
+        pass
+
+
+def _cuma_11036_normalize_spans(raw_spans, output_total: int = 0) -> dict[int, tuple[int, int]]:
+    """Normaliza mapa página-origem -> intervalo de páginas na saída."""
+    normalized: dict[int, tuple[int, int]] = {}
+    if not isinstance(raw_spans, dict):
+        return normalized
+    limit = max(0, int(output_total or 0))
+    for raw_page, raw_span in raw_spans.items():
+        try:
+            source_page = int(raw_page)
+            if source_page <= 0:
+                continue
+            if isinstance(raw_span, (list, tuple)) and len(raw_span) >= 2:
+                first, last = int(raw_span[0]), int(raw_span[1])
+            else:
+                first = last = int(raw_span)
+            if first > last:
+                first, last = last, first
+            first = max(1, first)
+            last = max(first, last)
+            if limit:
+                first = min(limit, first)
+                last = min(limit, last)
+            normalized[source_page] = (first, last)
+        except Exception:
+            continue
+    return dict(sorted(normalized.items()))
+
+
+def _cuma_11036_map_source_page(
+    spans: dict[int, tuple[int, int]],
+    source_page: int,
+    *,
+    lower: int | None = None,
+    upper: int | None = None,
+    prefer_next: bool = True,
+    use_last: bool = False,
+) -> int | None:
+    """Mapeia uma página; se ela foi removida, usa a preservada mais próxima."""
+    if not spans:
+        return None
+    try:
+        wanted = max(1, int(source_page))
+    except Exception:
+        wanted = 1
+    keys = [
+        page for page in spans
+        if (lower is None or page >= int(lower))
+        and (upper is None or page <= int(upper))
+    ]
+    if not keys:
+        return None
+    keys.sort()
+    if wanted in spans and wanted in keys:
+        selected = wanted
+    else:
+        after = [page for page in keys if page >= wanted]
+        before = [page for page in keys if page <= wanted]
+        if prefer_next and after:
+            selected = after[0]
+        elif before:
+            selected = before[-1]
+        elif after:
+            selected = after[0]
+        else:
+            selected = keys[0]
+    span = spans[selected]
+    return int(span[1] if use_last else span[0])
+
+
+def _cuma_11036_remap_metadata(
+    metadata: dict,
+    raw_spans,
+    output_total: int,
+    source_total: int = 0,
+) -> dict:
+    """Reposiciona capa global, inícios, capas e finais de cada volume."""
+    spans = _cuma_11036_normalize_spans(raw_spans, output_total)
+    total_out = max(1, int(output_total or 1))
+    local = dict(metadata or {})
+    original_volumes = [
+        dict(volume) for volume in (local.get("volumes") or [])
+        if isinstance(volume, dict)
+    ]
+    original_volumes.sort(key=lambda volume: int(volume.get("start_page") or 1))
+
+    remapped_volumes: list[dict] = []
+    for index, volume in enumerate(original_volumes):
+        try:
+            old_start = max(1, int(volume.get("start_page") or 1))
+        except Exception:
+            old_start = 1
+        try:
+            old_end = int(volume.get("end_page") or 0)
+        except Exception:
+            old_end = 0
+        if old_end < old_start:
+            if index + 1 < len(original_volumes):
+                try:
+                    old_end = max(old_start, int(original_volumes[index + 1].get("start_page") or old_start) - 1)
+                except Exception:
+                    old_end = old_start
+            else:
+                old_end = max(old_start, int(source_total or local.get("total_pages") or max(spans, default=old_start)))
+        try:
+            old_cover = max(1, int(volume.get("cover_page") or old_start))
+        except Exception:
+            old_cover = old_start
+
+        pages_in_volume = [page for page in spans if old_start <= page <= old_end]
+        if not pages_in_volume:
+            continue
+
+        new_start = _cuma_11036_map_source_page(
+            spans, old_start, lower=old_start, upper=old_end, prefer_next=True
+        )
+        new_cover = _cuma_11036_map_source_page(
+            spans, old_cover, lower=old_start, upper=old_end, prefer_next=True
+        )
+        if new_start is None:
+            new_start = min(spans[page][0] for page in pages_in_volume)
+        if new_cover is None:
+            new_cover = new_start
+
+        updated = dict(volume)
+        updated["volume"] = len(remapped_volumes) + 1
+        updated["title"] = str(volume.get("title") or f"Volume {len(remapped_volumes) + 1}")
+        updated["start_page"] = max(1, min(total_out, int(new_start)))
+        updated["cover_page"] = max(1, min(total_out, int(new_cover)))
+        updated["end_page"] = updated["start_page"]
+        remapped_volumes.append(updated)
+
+    # Evita duas entradas apontando para a mesma página quando um intervalo
+    # personalizado removeu um volume inteiro.
+    unique_volumes: list[dict] = []
+    seen_starts: set[int] = set()
+    for volume in sorted(remapped_volumes, key=lambda item: int(item.get("start_page") or 1)):
+        start = int(volume.get("start_page") or 1)
+        if start in seen_starts:
+            continue
+        seen_starts.add(start)
+        unique_volumes.append(volume)
+    remapped_volumes = unique_volumes
+
+    if not remapped_volumes:
+        remapped_volumes = [{
+            "volume": 1,
+            "title": "Volume 1",
+            "start_page": 1,
+            "end_page": total_out,
+            "cover_page": 1,
+        }]
+
+    for index, volume in enumerate(remapped_volumes):
+        volume["volume"] = index + 1
+        start = int(volume.get("start_page") or 1)
+        if index + 1 < len(remapped_volumes):
+            end = int(remapped_volumes[index + 1].get("start_page") or total_out) - 1
+        else:
+            end = total_out
+        volume["end_page"] = max(start, min(total_out, end))
+        volume["cover_page"] = max(start, min(volume["end_page"], int(volume.get("cover_page") or start)))
+
+    local["volumes"] = remapped_volumes
+    local["mode"] = "multi_volume" if len(remapped_volumes) > 1 else "single_volume"
+    local["total_pages"] = total_out
+
+    try:
+        old_global_cover = int(local.get("cover_page") or 1)
+    except Exception:
+        old_global_cover = 1
+    mapped_global_cover = _cuma_11036_map_source_page(spans, old_global_cover, prefer_next=True)
+    local["cover_page"] = max(1, min(total_out, int(mapped_global_cover or 1)))
+
+    # Capítulos opcionais usam a mesma transformação quando possuem páginas.
+    chapters = []
+    for chapter in local.get("chapters") or []:
+        if not isinstance(chapter, dict):
+            continue
+        updated = dict(chapter)
+        for key, use_last in (("page", False), ("start_page", False), ("cover_page", False), ("end_page", True)):
+            if key not in updated:
+                continue
+            mapped = _cuma_11036_map_source_page(
+                spans,
+                updated.get(key) or 1,
+                prefer_next=not use_last,
+                use_last=use_last,
+            )
+            if mapped is not None:
+                updated[key] = max(1, min(total_out, int(mapped)))
+        chapters.append(updated)
+    if chapters:
+        local["chapters"] = chapters
+
+    local = _cuma_11013_validate_metadata(local, total_out)
+    validation = local.get("validation") if isinstance(local.get("validation"), dict) else {}
+    messages = list(validation.get("messages") or [])
+    messages.append(
+        f"Páginas de volume remapeadas pela limpeza: "
+        f"{int(source_total or metadata.get('total_pages') or len(spans))}→{total_out}; "
+        f"{len(spans)} página(s) de origem rastreadas."
+    )
+    validation["status"] = "remapped_after_clean"
+    validation["messages"] = messages
+    local["validation"] = validation
+    local["page_remap"] = {
+        "schema_version": 1,
+        "strategy": "tracked_cleaning_pipeline",
+        "source_pages": int(source_total or metadata.get("total_pages") or len(spans)),
+        "output_pages": total_out,
+        "mapped_source_pages": len(spans),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    return local
+
+
+def _cuma_11036_remap_toc(
+    source_toc: list,
+    spans: dict[int, tuple[int, int]],
+    metadata: dict,
+    output_total: int,
+) -> list[list]:
+    remapped: list[list] = []
+    for item in source_toc or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+        try:
+            level = max(1, int(item[0]))
+            title = str(item[1] or "")
+            old_page = max(1, int(item[2]))
+            new_page = _cuma_11036_map_source_page(spans, old_page, prefer_next=True)
+            if new_page is not None:
+                remapped.append([level, title, max(1, min(int(output_total), int(new_page)))])
+        except Exception:
+            continue
+    if remapped:
+        return remapped
+    for volume in metadata.get("volumes") or []:
+        try:
+            remapped.append([
+                1,
+                str(volume.get("title") or f"Volume {volume.get('volume', '')}"),
+                max(1, min(int(output_total), int(volume.get("start_page") or 1))),
+            ])
+        except Exception:
+            continue
+    return remapped
+
+
+def _cuma_11036_write_pdf_toc(path: Path, toc: list[list]) -> bool:
+    """Substitui o TOC pelo mapa já remapeado, com troca atômica."""
+    path = Path(path)
+    doc = None
+    tmp = path.with_suffix(path.suffix + ".cuma_toc.tmp")
+    old_mode = None
+    try:
+        try:
+            old_mode = stat.S_IMODE(path.stat().st_mode)
+        except Exception:
+            old_mode = None
+        tmp.unlink(missing_ok=True)
+        doc = fitz.open(str(path))
+        doc.set_toc(toc or [])
+        save_kwargs = {"garbage": 4, "deflate": True, "clean": True}
+        try:
+            save_kwargs["encryption"] = fitz.PDF_ENCRYPT_KEEP
+        except Exception:
+            pass
+        doc.save(str(tmp), **save_kwargs)
+        doc.close()
+        doc = None
+        os.replace(str(tmp), str(path))
+        if old_mode is not None:
+            try:
+                os.chmod(path, old_mode)
+            except Exception:
+                pass
+        return True
+    except Exception as exc:
+        _cuma_11036_log(f"Falha ao gravar TOC remapeado em {path}", exc)
+        return False
+    finally:
+        try:
+            if doc is not None:
+                doc.close()
+        except Exception:
+            pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _cuma_11036_capture_source_state(source: Path) -> tuple[dict | None, list, int]:
+    metadata = None
+    toc = []
+    total = 0
+    try:
+        total = int(_cuma_11013_page_count(source) or 0)
+    except Exception:
+        total = 0
+    try:
+        metadata = _cuma_11013_read_embedded_metadata(source)
+    except Exception as exc:
+        _cuma_11036_log(f"Falha ao ler metadados antes da limpeza: {source}", exc)
+    if Path(source).suffix.lower() == ".pdf":
+        doc = None
+        try:
+            doc = fitz.open(str(source))
+            toc = list(doc.get_toc(simple=True) or [])
+            total = len(doc)
+        except Exception as exc:
+            _cuma_11036_log(f"Falha ao ler TOC antes da limpeza: {source}", exc)
+        finally:
+            try:
+                if doc is not None:
+                    doc.close()
+            except Exception:
+                pass
+    return metadata, toc, int(total or 0)
+
+
+_CUMA_11036_OLD_PDF_CLEAN = getattr(PDFCleaner, "clean", None)
+
+
+def _cuma_11036_pdf_clean(self, source: Path, output_pdf: Path, progress=None, cancel=None) -> Result:
+    """Executa a limpeza e reaplica metadados com as páginas efetivamente geradas."""
+    source = Path(source)
+    source_metadata, source_toc, source_total = _cuma_11036_capture_source_state(source)
+    result = _CUMA_11036_OLD_PDF_CLEAN(
+        self, source, output_pdf, progress=progress, cancel=cancel
+    ) if callable(_CUMA_11036_OLD_PDF_CLEAN) else Result(source=str(source))
+
+    try:
+        if not isinstance(source_metadata, dict):
+            return result
+
+        primary = Path(getattr(result, "output", "") or "")
+        final_spans = _cuma_11036_normalize_spans(
+            getattr(result, "_cuma_source_page_spans", {}) or {},
+            int(getattr(result, "final_pages", 0) or 0),
+        )
+        base_spans = _cuma_11036_normalize_spans(
+            getattr(result, "_cuma_source_page_spans_before_visual", {}) or final_spans,
+            0,
+        )
+        if not final_spans and not base_spans:
+            _cuma_11036_log("Limpeza concluída sem mapa de páginas; metadados anteriores foram mantidos.")
+            return result
+
+        outputs: list[Path] = []
+        if primary.exists() and primary.is_file():
+            outputs.append(primary)
+        for part in str(getattr(result, "extra_outputs", "") or "").split("|"):
+            candidate_text = part.strip()
+            if not candidate_text:
+                continue
+            try:
+                candidate = Path(candidate_text)
+                if candidate.exists() and candidate.is_file():
+                    outputs.append(candidate)
+            except Exception:
+                continue
+
+        deduped: list[Path] = []
+        seen = set()
+        for output in outputs:
+            key = os.path.normcase(os.path.abspath(str(output)))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(output)
+
+        for output in deduped:
+            kind = _cuma_11013_file_kind(output)
+            output_total = int(_cuma_11013_page_count(output) or 0)
+            if output_total <= 0 or not _cuma_11013_supported_for_embedded_metadata(output):
+                continue
+
+            is_primary_pdf = (
+                kind == "pdf"
+                and primary.exists()
+                and os.path.normcase(os.path.abspath(str(output)))
+                == os.path.normcase(os.path.abspath(str(primary)))
+            )
+            spans = final_spans if is_primary_pdf else base_spans
+            if not spans:
+                continue
+
+            remapped = _cuma_11036_remap_metadata(
+                source_metadata,
+                spans,
+                output_total,
+                source_total,
+            )
+            if not _cuma_11013_write_embedded_metadata(output, remapped):
+                continue
+
+            if kind == "pdf":
+                toc = _cuma_11036_remap_toc(source_toc, spans, remapped, output_total)
+                _cuma_11036_write_pdf_toc(output, toc)
+
+            _cuma_11036_log(
+                f"Metadados remapeados em {output.name}: "
+                f"{source_total}→{output_total} páginas; "
+                f"volumes={len(remapped.get('volumes') or [])}."
+            )
+
+        if primary.exists() and primary.is_file():
+            result.final_size = int(primary.stat().st_size)
+            result.saved_bytes = max(
+                0,
+                int(getattr(result, "original_size", 0) or 0) - result.final_size,
+            )
+    except Exception as exc:
+        _cuma_11036_log("Falha no remapeamento pós-limpeza", exc)
+    return result
+
+
+_CUMA_11036_OLD_SETUP_VARS = getattr(App, "setup_vars", None)
+_CUMA_11036_OLD_BUILD = getattr(App, "build", None)
+
+
+def _cuma_11036_apply_globals() -> None:
+    global APP_VERSION, APP_DISPLAY_VERSION, APP_DISPLAY_NAME
+    global CUMA_CONVERTER_DEVICE_UPDATE_VERSION, CHANGELOG_LATEST
+    APP_VERSION = f"{CUMA_11036_VERSION} CUMA"
+    APP_DISPLAY_VERSION = CUMA_11036_VERSION
+    APP_DISPLAY_NAME = "CUMA"
+    CUMA_CONVERTER_DEVICE_UPDATE_VERSION = CUMA_11036_VERSION
+    CHANGELOG_LATEST = (
+        "Capas e limites de volume agora são remapeados pela página original "
+        "após remoções, divisões de página dupla e segmentação webtoon."
+    )
+    for name in list(globals()):
+        if re.fullmatch(r"CUMA_11\d{3}_VERSION", str(name)):
+            globals()[name] = CUMA_11036_VERSION
+
+
+def _cuma_11036_setup_vars(self, *args, **kwargs):
+    result = (
+        _CUMA_11036_OLD_SETUP_VARS(self, *args, **kwargs)
+        if callable(_CUMA_11036_OLD_SETUP_VARS)
+        else None
+    )
+    _cuma_11036_apply_globals()
+    return result
+
+
+def _cuma_11036_build(self, *args, **kwargs):
+    result = (
+        _CUMA_11036_OLD_BUILD(self, *args, **kwargs)
+        if callable(_CUMA_11036_OLD_BUILD)
+        else None
+    )
+    _cuma_11036_apply_globals()
+    try:
+        self.root.title("CUMA")
+    except Exception:
+        pass
+    return result
+
+
+def _cuma_11036_update_runtime_docs() -> None:
+    """Mantém README/manual alinhados depois da camada 1.100.35 regravá-los."""
+    readme_note = """
+ATUALIZAÇÃO 1.100.36
+- Capas e limites de volumes são remapeados pela página original após a limpeza.
+- Páginas já marcadas como capa/início de volume são protegidas contra remoção.
+- JSON CUMA e bookmarks recebem a numeração final do PDF.
+""".strip()
+    manual_note = """
+===============================================================================
+ATUALIZAÇÃO 1.100.36 - REMAPEAMENTO DE CAPAS E VOLUMES
+===============================================================================
+Ao limpar um PDF que já possui metadados CUMA, o programa registra a relação
+entre cada página original e a página correspondente no arquivo final.
+
+Exemplo: se a capa do Volume 3 era a página 410 e nove páginas anteriores foram
+divididas em duas, a capa passa automaticamente para a página 419. O início e o
+fim de todos os volumes, a capa global, capítulos e bookmarks são atualizados
+pela mesma relação. As páginas já marcadas como capa ou início de volume também
+são protegidas contra remoção automática por baixa densidade.
+""".strip()
+    try:
+        readme = app_dir() / "LEIA-ME.txt"
+        content = readme.read_text(encoding="utf-8") if readme.exists() else ""
+        content = re.sub(r"^CUMA 1\.\d+\.\d+", f"CUMA {CUMA_11036_VERSION}", content, count=1, flags=re.M)
+        if "ATUALIZAÇÃO 1.100.36" not in content:
+            content = content.rstrip() + "\n\n" + readme_note + "\n"
+        readme.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        _cuma_11036_log("Falha ao atualizar LEIA-ME 1.100.36", exc)
+    try:
+        manual = manual_path()
+        content = manual.read_text(encoding="utf-8") if manual.exists() else ""
+        content = re.sub(
+            r"(Versão:\s*)1\.\d+\.\d+",
+            rf"\g<1>{CUMA_11036_VERSION}",
+            content,
+            count=1,
+        )
+        if "ATUALIZAÇÃO 1.100.36 - REMAPEAMENTO DE CAPAS E VOLUMES" not in content:
+            content = content.rstrip() + "\n\n" + manual_note + "\n"
+        manual.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        _cuma_11036_log("Falha ao atualizar manual 1.100.36", exc)
+
+
+def _cuma_11036_install() -> None:
+    _cuma_11036_apply_globals()
+    try:
+        _cuma_11035_sync_version_state()
+    except Exception:
+        pass
+    try:
+        _cuma_11036_update_runtime_docs()
+    except Exception:
+        pass
+    PDFCleaner.clean = _cuma_11036_pdf_clean
+    App.setup_vars = _cuma_11036_setup_vars
+    App.build = _cuma_11036_build
+    try:
+        write_log(
+            f"CUMA {CUMA_11036_VERSION}: remapeamento estrutural de capas/volumes instalado."
+        )
+    except Exception:
+        pass
+
+
+_cuma_11036_install()
+
+
+if __name__ == "__main__":
     main()

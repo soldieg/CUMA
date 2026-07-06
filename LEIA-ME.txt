@@ -1,36 +1,23 @@
-CUMA - Conversor Ultimate de Mangás
-Versão: 1.100.12
+CUMA 1.100.37
 
-COMO USAR
-1. Extraia o ZIP inteiro.
-2. Abra cuma.exe.
-3. Não apague a pasta _internal.
-4. O manual completo está em manual_do_programa.txt.
+Aplicativo para limpeza, organização, metadados e conversão de mangás.
 
-CORREÇÃO DA 1.100.10
-- Rodapé da janela de atualização corrigido para ficar sempre visível.
-- Botão Cancelar sempre visível.
-- Botão Baixar aparece quando há atualização disponível.
-- Caixa de detalhes com barra de rolagem vertical.
+FUNÇÕES
+- Limpeza de PDF e remoção dinâmica de bordas.
+- Conversão entre PDF, EPUB, CBZ/imagens e XTC/XTCH/XTHC.
+- Metadados nas abas Limpar e Converter.
+- Atualizador externo com SHA256, backup único, rollback e log detalhado.
+- Builds autocontidos para Windows, Linux e macOS.
 
+LOGS
+- CUMA.log: execução geral.
+- erro.txt: erros detalhados.
+- CUMA_update.log: atualização.
+- CUMA_bootstrap.log: preparação local/build.
 
-ATUALIZADOR AUTOMÁTICO 1.100.12
-- Use "Procurar atualizações" > "Atualizar agora" para baixar e instalar automaticamente.
-- Use "Baixar manualmente" se quiser decidir quando instalar.
-- A instalação automática fecha o CUMA para substituir os arquivos com segurança.
-- O SHA256 do pacote precisa estar preenchido no updates/stable.json.
+Consulte manual_do_programa.txt.
 
-
-===============================================================================
-CUMA 1.100.12 - ATUALIZADOR EXTERNO E PACOTE ORGANIZADO
-===============================================================================
-
-Nesta versão, o botão "Procurar atualizações" do CUMA principal apenas abre o
-cuma_updater.exe. A verificação no GitHub, a janela com "Atualizar agora" e
-"Baixar manualmente", o download, a validação SHA256, o fechamento do CUMA e a
-instalação ficam dentro do atualizador externo.
-
-O pacote de desenvolvimento também foi separado em pastas:
-- GitHub: arquivos para atualizar o repositório.
-- arquivos necessários: BATs para rodar e compilar.
-- ZIP final: local onde o CUMA_windows.zip será gerado.
+ATUALIZAÇÃO 1.100.36
+- Capas e limites de volumes são remapeados pela página original após a limpeza.
+- Páginas já marcadas como capa/início de volume são protegidas contra remoção.
+- JSON CUMA e bookmarks recebem a numeração final do PDF.

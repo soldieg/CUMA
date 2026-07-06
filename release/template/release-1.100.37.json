@@ -1,0 +1,15 @@
+{
+  "version": "1.100.37",
+  "summary": "Correções de limpeza, metadados, retomada da interface e automação de releases.",
+  "notes": [
+    "Preserva texto vetorial e bookmarks durante a limpeza de PDFs.",
+    "Remapeia automaticamente capas e limites dos volumes quando páginas são divididas ou removidas.",
+    "Corrige os dois botões Play de retomada do processamento.",
+    "Fortalece a validação e a extração segura do atualizador.",
+    "Adiciona publicação automática para Windows, Linux e macOS pelo GitHub Actions."
+  ],
+  "mandatory": false,
+  "minimum_supported_version": "1.080.0",
+  "prerelease": false,
+  "delete": []
+}

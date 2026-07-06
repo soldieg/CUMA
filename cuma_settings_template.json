@@ -352,7 +352,7 @@
     }
   },
   "version_state": {
-    "current_version": "1.100.25",
+    "current_version": "1.100.37",
     "base_version": "1.080.0",
     "schema": {
       "grande": {
@@ -456,7 +456,7 @@
   },
   "version_history": {
     "base_version": "1.080.0",
-    "current_version": "1.100.25",
+    "current_version": "1.100.37",
     "events": [
       {
         "update_id": "base_1_080_0",
@@ -510,7 +510,7 @@
   },
   "version": {
     "name": "CUMA",
-    "version": "1.100.25",
+    "version": "1.100.37",
     "base_version": "1.080.0",
     "build": "storage_consolidation_1_081_2",
     "notes": "Correção do layout do atualizador, rodapé fixo e build Windows CUMA_windows.",
@@ -521,7 +521,7 @@
       "pouca": "soma 1 no terceiro número: 1.080.0 -> 1.080.1"
     },
     "updated_at": "2026-06-23",
-    "current_version": "1.100.25"
+    "current_version": "1.100.37"
   },
   "runtime": {},
   "updates": {
@@ -564,12 +564,12 @@
   },
   "version_metadata": {
     "name": "CUMA",
-    "version": "1.100.25",
+    "version": "1.100.37",
     "base_version": "1.080.0",
     "build": "update_dialog_fixed_footer_11009",
     "notes": "Janela de atualizações com botões fixos e script de informações da release.",
     "updated_at": "2026-06-23",
-    "current_version": "1.100.25"
+    "current_version": "1.100.37"
   },
   "advanced_processing": {
     "reading_order": "Ocidental",
@@ -614,7 +614,7 @@
     "mode": "pure_conversion_no_visual_reprocessing"
   },
   "versioning": {
-    "current_version": "1.100.30"
+    "current_version": "1.100.37"
   },
   "output_root": "limpos",
   "metadata_system": {
@@ -628,7 +628,7 @@
       "xtch_xthc_xth": "adaptador XTCJS embutido"
     },
     "auto_volume_detection": true,
-    "auto_volume_detection_version": "1.100.23",
+    "auto_volume_detection_version": "1.100.37",
     "pdf_large_file_threshold_pages": 300,
     "methods": [
       "pdf_toc",
@@ -644,7 +644,7 @@
     "temporary_update_log": "%TEMP%\\CUMA_updates\\update_*\\CUMA_update.log"
   },
   "app": {
-    "version": "1.100.30",
-    "display_version": "1.100.30"
+    "version": "1.100.37",
+    "display_version": "1.100.37"
   }
 }

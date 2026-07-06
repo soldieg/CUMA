@@ -1,0 +1,340 @@
+name: Publicar CUMA automaticamente
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "release/inbox/**"
+  workflow_dispatch:
+    inputs:
+      release_dir:
+        description: "Pasta dentro de release/inbox (ex.: 1.100.38). Vazio = detectar automaticamente."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cuma-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Preparar, validar e registrar fonte
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      release_dir: ${{ steps.release.outputs.release_dir }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
+    steps:
+      - name: Baixar branch principal
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Dependências do teste
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk libgl1 libglib2.0-0 xdg-utils
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Aplicar pasta de release
+        id: release
+        shell: bash
+        env:
+          RELEASE_DIR_INPUT: ${{ inputs.release_dir }}
+        run: |
+          python scripts/release_pipeline.py prepare \
+            --release-dir "$RELEASE_DIR_INPUT" \
+            --context "$RUNNER_TEMP/release-context.json" \
+            --notes-output "$RUNNER_TEMP/release-notes.md"
+
+      - name: Auditoria estrutural
+        shell: bash
+        run: |
+          python scripts/auditoria_integridade.py --version "${{ steps.release.outputs.version }}"
+          python -m compileall -q .
+
+      - name: Testes de regressão
+        shell: bash
+        run: python scripts/testes_regressao_debug.py
+
+      - name: Smoke test da interface e dos botões
+        shell: bash
+        run: xvfb-run -a python scripts/smoke_interface.py
+
+      - name: Commitar fonte preparada
+        id: commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração nova; continuando a partir do estado já preparado."
+          else
+            git commit -m "release: preparar CUMA ${{ steps.release.outputs.version }}"
+            git push origin HEAD:main
+          fi
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Guardar contexto da release
+        uses: actions/upload-artifact@v4
+        with:
+          name: CUMA_release_context
+          path: |
+            ${{ runner.temp }}/release-context.json
+            ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: Compilar Windows
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Auditar e testar launchers BAT
+        shell: cmd
+        env:
+          CI: "true"
+        run: python scripts\testar_bats_windows.py --execute-checks
+
+      - name: Validar estrutura Windows
+        shell: cmd
+        env:
+          CI: "true"
+        run: call "compilacao\Windows\criar_windows.bat" --check
+      - name: Gerar CUMA_windows.zip
+        shell: cmd
+        env:
+          CI: "true"
+          CUMA_SKIP_MANIFEST: "1"
+        run: call "compilacao\Windows\criar_windows.bat"
+      - name: Validar pacote Windows
+        shell: pwsh
+        run: |
+          python scripts/release_pipeline.py verify-asset `
+            --platform windows `
+            --path "ZIP final/Windows/CUMA_windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CUMA_windows
+          path: "ZIP final/Windows/CUMA_windows.zip"
+          if-no-files-found: error
+          retention-days: 14
+
+  build-linux:
+    name: Compilar Linux
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dependências do sistema
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libgl1 libglib2.0-0 xdg-utils
+      - name: Gerar CUMA_linux.tar.gz
+        shell: bash
+        env:
+          CI: "true"
+          CUMA_SKIP_MANIFEST: "1"
+        run: |
+          chmod +x "compilacao/Linux/criar_linux_tar.sh"
+          "compilacao/Linux/criar_linux_tar.sh"
+      - name: Validar pacote Linux
+        shell: bash
+        run: |
+          python scripts/release_pipeline.py verify-asset \
+            --platform linux \
+            --path "ZIP final/Linux/CUMA_linux.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CUMA_linux
+          path: "ZIP final/Linux/CUMA_linux.tar.gz"
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Compilar macOS
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Gerar CUMA_macos.zip
+        shell: bash
+        env:
+          CI: "true"
+          CUMA_SKIP_MANIFEST: "1"
+        run: |
+          chmod +x "compilacao/macOS/criar_macos_zip.sh"
+          "compilacao/macOS/criar_macos_zip.sh"
+      - name: Validar pacote macOS
+        shell: bash
+        run: |
+          python scripts/release_pipeline.py verify-asset \
+            --platform macos \
+            --path "ZIP final/macOS/CUMA_macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CUMA_macos
+          path: "ZIP final/macOS/CUMA_macos.zip"
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Criar Release, publicar assets e liberar update
+    needs:
+      - prepare
+      - build-windows
+      - build-linux
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar fonte preparada
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: CUMA_release_context
+          path: ${{ runner.temp }}/release-context
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: CUMA_windows
+          path: release-assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: CUMA_linux
+          path: release-assets
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: CUMA_macos
+          path: release-assets
+
+      - name: Consolidar hashes e stable.json
+        shell: bash
+        run: |
+          python scripts/release_pipeline.py manifest \
+            --context "$RUNNER_TEMP/release-context/release-context.json" \
+            --assets-dir release-assets \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/stable.json" \
+            --sums-output "release-assets/SHA256SUMS.txt"
+
+      - name: Criar ou recuperar GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.commit_sha }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG já existe; os assets serão validados e substituídos."
+          else
+            extra=()
+            if [ "$PRERELEASE" = "true" ]; then
+              extra+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --target "$RELEASE_SHA" \
+              --title "CUMA $RELEASE_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-context/release-notes.md" \
+              "${extra[@]}"
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            release-assets/CUMA_windows.zip \
+            release-assets/CUMA_linux.tar.gz \
+            release-assets/CUMA_macos.zip \
+            release-assets/SHA256SUMS.txt \
+            "$RUNNER_TEMP/stable.json" \
+            --clobber
+
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+          if [ "$is_draft" = "true" ]; then
+            gh release edit "$RELEASE_TAG" --draft=false
+          fi
+
+      - name: Atualizar manifesto na main e encerrar inbox
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/release-context/release-context.json" "$RUNNER_TEMP/context-final.json"
+          git fetch origin main
+          git switch -C main origin/main
+          mkdir -p updates
+          cp "$RUNNER_TEMP/stable.json" updates/stable.json
+
+          python scripts/release_pipeline.py finalize \
+            --context "$RUNNER_TEMP/context-final.json" \
+            --manifest updates/stable.json \
+            --release-url "https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+
+          python scripts/auditoria_integridade.py \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --require-published-manifest
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Manifesto e histórico já estavam finalizados."
+          else
+            git commit -m "release: publicar CUMA ${{ needs.prepare.outputs.version }}"
+            git push origin main
+          fi
+
+      - name: Resumo da publicação
+        shell: bash
+        run: |
+          {
+            echo "## CUMA ${{ needs.prepare.outputs.version }}"
+            echo
+            echo "- Tag: \`${{ needs.prepare.outputs.tag }}\`"
+            echo "- Windows: \`CUMA_windows.zip\`"
+            echo "- Linux: \`CUMA_linux.tar.gz\`"
+            echo "- macOS: \`CUMA_macos.zip\`"
+            echo "- Manifesto: \`updates/stable.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"

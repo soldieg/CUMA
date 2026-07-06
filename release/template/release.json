@@ -1,0 +1,12 @@
+{
+  "version": "1.100.38",
+  "summary": "Resumo curto da versão.",
+  "notes": [
+    "Descreva a primeira alteração.",
+    "Descreva a segunda alteração."
+  ],
+  "mandatory": false,
+  "minimum_supported_version": "1.080.0",
+  "prerelease": false,
+  "delete": []
+}
