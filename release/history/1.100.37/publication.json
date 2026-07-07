@@ -1,18 +1,8 @@
 {
-  "app_id": "cuma",
-  "channel": "stable",
   "version": "1.100.37",
-  "minimum_supported_version": "1.080.0",
-  "mandatory": false,
+  "tag": "v1.100.37",
   "published_at": "2026-07-07T01:11:02Z",
   "release_url": "https://github.com/soldieg/CUMA/releases/tag/v1.100.37",
-  "release_notes": [
-    "Preserva texto vetorial e bookmarks durante a limpeza de PDFs.",
-    "Remapeia capas e limites dos volumes após divisão ou remoção de páginas.",
-    "Corrige os botões Play e os launchers BAT do Windows.",
-    "Corrige validação de symlinks internos em Linux e macOS.",
-    "Corrige consolidação dos artifacts e publicação automática."
-  ],
   "platforms": {
     "windows": {
       "asset_name": "CUMA_windows.zip",
@@ -39,9 +29,5 @@
       "main_exe_name": "cuma"
     }
   },
-  "download_url": "https://github.com/soldieg/CUMA/releases/download/v1.100.37/CUMA_windows.zip",
-  "sha256": "74B1AE65F038C473DFB9568BC3B9174E035253FFDC1A62595728ED9BA3FD7095",
-  "size_bytes": 66514418,
-  "archive_type": "zip",
-  "main_exe_name": "cuma.exe"
+  "status": "published"
 }

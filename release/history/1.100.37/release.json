@@ -15,5 +15,6 @@
   "source": "release/inbox/1.100.37",
   "prepared_at": "2026-07-07T01:08:32Z",
   "payload_changes": [],
-  "status": "prepared"
+  "status": "published",
+  "published_at": "2026-07-07T01:11:02Z"
 }
