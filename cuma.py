@@ -3170,8 +3170,6 @@ def cuma_calculate_dynamic_version(base_version: str = CUMA_BASE_VERSION, update
     return f'{major}.{minor}.{feature}.{recovery}.{patch}'
 
 APP_DISPLAY_VERSION = "1.100.37"
-
-
 def cuma_register_version_event(update_scale: str, description: str) -> None:
     try:
         path = runtime_dir() / CUMA_VERSION_HISTORY_FILE
