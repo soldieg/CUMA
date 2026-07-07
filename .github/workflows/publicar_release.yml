@@ -247,32 +247,32 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CUMA_windows
-          path: release-assets/windows
+          path: ${{ runner.temp }}/release-assets/windows
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CUMA_linux
-          path: release-assets/linux
+          path: ${{ runner.temp }}/release-assets/linux
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CUMA_macos
-          path: release-assets/macos
+          path: ${{ runner.temp }}/release-assets/macos
 
       - name: Diagnosticar artifacts baixados
         shell: bash
         run: |
-          find release-assets -maxdepth 3 -type f -printf '%p | %s bytes\n' | sort
+          find "$RUNNER_TEMP/release-assets" -maxdepth 3 -type f -printf '%p | %s bytes\n' | sort
 
       - name: Consolidar hashes e stable.json
         shell: bash
         run: |
           python scripts/release_pipeline.py manifest \
             --context "$RUNNER_TEMP/release-context/release-context.json" \
-            --assets-dir release-assets \
+            --assets-dir "$RUNNER_TEMP/release-assets" \
             --repository "$GITHUB_REPOSITORY" \
             --output "$RUNNER_TEMP/stable.json" \
-            --sums-output "release-assets/SHA256SUMS.txt"
+            --sums-output "$RUNNER_TEMP/release-assets/SHA256SUMS.txt"
 
       - name: Criar ou recuperar GitHub Release
         shell: bash
@@ -300,10 +300,10 @@ jobs:
           fi
 
           gh release upload "$RELEASE_TAG" \
-            release-assets/windows/CUMA_windows.zip \
-            release-assets/linux/CUMA_linux.tar.gz \
-            release-assets/macos/CUMA_macos.zip \
-            release-assets/SHA256SUMS.txt \
+            "$RUNNER_TEMP/release-assets/windows/CUMA_windows.zip" \
+            "$RUNNER_TEMP/release-assets/linux/CUMA_linux.tar.gz" \
+            "$RUNNER_TEMP/release-assets/macos/CUMA_macos.zip" \
+            "$RUNNER_TEMP/release-assets/SHA256SUMS.txt" \
             "$RUNNER_TEMP/stable.json" \
             --clobber
 
@@ -321,6 +321,8 @@ jobs:
           cp "$RUNNER_TEMP/release-context/release-context.json" "$RUNNER_TEMP/context-final.json"
           git fetch origin main
           git switch -C main origin/main
+          # Artifacts são temporários e nunca podem permanecer na árvore Git.
+          rm -rf release-assets release-artifact
           mkdir -p updates
           cp "$RUNNER_TEMP/stable.json" updates/stable.json
 
