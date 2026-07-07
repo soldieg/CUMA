@@ -1,11 +1,11 @@
 # CUMA 1.100.37
 
-Correções de limpeza, metadados, retomada da interface e automação de releases.
+Correções de limpeza, metadados, interface, builds e automação de releases.
 
 ## Alterações
 
 - Preserva texto vetorial e bookmarks durante a limpeza de PDFs.
-- Remapeia automaticamente capas e limites dos volumes quando páginas são divididas ou removidas.
-- Corrige os dois botões Play de retomada do processamento.
-- Fortalece a validação e a extração segura do atualizador.
-- Adiciona publicação automática para Windows, Linux e macOS pelo GitHub Actions.
+- Remapeia capas e limites dos volumes após divisão ou remoção de páginas.
+- Corrige os botões Play e os launchers BAT do Windows.
+- Corrige validação de symlinks internos em Linux e macOS.
+- Corrige consolidação dos artifacts e publicação automática.
