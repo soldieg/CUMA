@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -188,16 +189,34 @@ def execute_checks() -> int:
     )
     env = os.environ.copy()
     env["CI"] = "true"
+    comspec = os.environ.get("COMSPEC") or "cmd.exe"
     for command in commands:
         print(f"[TESTE] {' '.join(command)}")
-        command_line = f'call "{command[0]}" ' + subprocess.list2cmdline(command[1:])
-        result = subprocess.run(
-            ["cmd.exe", "/d", "/s", "/c", command_line],
-            cwd=ROOT,
-            env=env,
-            timeout=120,
-            check=False,
-        )
+        # Não passe uma linha com aspas diretamente a ``cmd /S /C``. O ``/S``
+        # reinterpreta as aspas externas e, no runner do GitHub, transformava
+        # o caminho em algo como ``\\"D:\\...\\rodar_cuma.bat\\"``.
+        # Um wrapper temporário evita essa segunda camada de parsing e também
+        # funciona quando o repositório está em um caminho com espaços.
+        with tempfile.TemporaryDirectory(prefix="cuma-bat-check-") as temp_dir:
+            wrapper = Path(temp_dir) / "run-check.cmd"
+            args = subprocess.list2cmdline(command[1:])
+            wrapper.write_bytes(
+                (
+                    "@echo off\r\n"
+                    "setlocal EnableExtensions DisableDelayedExpansion\r\n"
+                    "chcp 65001 >nul 2>nul\r\n"
+                    f'call "{command[0]}" {args}\r\n'
+                    'set "CUMA_TEST_RC=%ERRORLEVEL%"\r\n'
+                    "endlocal & exit /b %CUMA_TEST_RC%\r\n"
+                ).encode("utf-8")
+            )
+            result = subprocess.run(
+                [comspec, "/d", "/c", wrapper.name],
+                cwd=temp_dir,
+                env=env,
+                timeout=120,
+                check=False,
+            )
         if result.returncode != 0:
             print(f"[ERRO] Falha dinâmica ({result.returncode}): {command[0]}")
             return result.returncode or 1

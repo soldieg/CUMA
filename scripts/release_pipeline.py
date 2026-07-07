@@ -499,10 +499,91 @@ def prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _archive_path(name: str, *, field: str = "entrada") -> PurePosixPath:
+    """Normaliza um caminho interno sem permitir absoluto, drive ou traversal."""
+    if "\\x00" in name:
+        raise ReleaseError(f"{field.capitalize()} contém byte NUL: {name!r}")
+    normalized = name.replace("\\", "/")
+    pure = PurePosixPath(normalized)
+    if (
+        not pure.parts
+        or pure.is_absolute()
+        or re.match(r"^[A-Za-z]:", normalized)
+        or ".." in pure.parts
+    ):
+        raise ReleaseError(f"{field.capitalize()} contém caminho inseguro: {name!r}")
+    return pure
+
+
 def _validate_archive_member(name: str) -> None:
-    pure = PurePosixPath(name.replace("\\", "/"))
-    if pure.is_absolute() or ".." in pure.parts:
-        raise ReleaseError(f"Arquivo compactado contém caminho inseguro: {name!r}")
+    _archive_path(name, field="arquivo compactado")
+
+
+def _resolve_safe_link(
+    member_name: str,
+    link_target: str,
+    *,
+    hardlink: bool = False,
+) -> PurePosixPath:
+    """Resolve lexicalmente um link e exige que permaneça na raiz do pacote.
+
+    Distribuições ``onedir`` do PyInstaller usam links simbólicos legítimos
+    para bibliotecas e frameworks em Linux/macOS. Eles podem ser aceitos sem
+    abrir traversal desde que sejam relativos e continuem sob a mesma pasta
+    de topo do pacote (``CUMA_linux`` ou ``CUMA_macos``).
+    """
+    member = _archive_path(member_name, field="nome do link")
+    if "\\x00" in link_target:
+        raise ReleaseError(f"Destino de link contém byte NUL: {member_name!r}")
+    normalized = link_target.replace("\\", "/")
+    target = PurePosixPath(normalized)
+    if (
+        not target.parts
+        or target.is_absolute()
+        or re.match(r"^[A-Za-z]:", normalized)
+    ):
+        raise ReleaseError(
+            f"Link possui destino absoluto ou inválido: {member_name!r} -> {link_target!r}"
+        )
+
+    package_root = member.parts[0]
+    if hardlink:
+        # Em TAR, hard links normalmente referenciam um nome a partir da raiz
+        # do arquivo. Aceitamos também a forma relativa à pasta de topo.
+        resolved: list[str] = [] if target.parts[0] == package_root else [package_root]
+    else:
+        resolved = list(member.parent.parts)
+
+    for part in target.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            # Nunca permita remover a pasta de topo do pacote.
+            if len(resolved) <= 1:
+                raise ReleaseError(
+                    f"Link escapa da raiz do pacote: {member_name!r} -> {link_target!r}"
+                )
+            resolved.pop()
+            continue
+        resolved.append(part)
+
+    if not resolved or resolved[0] != package_root:
+        raise ReleaseError(
+            f"Link escapa da raiz do pacote: {member_name!r} -> {link_target!r}"
+        )
+    return PurePosixPath(*resolved)
+
+
+def _zip_symlink_target(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> str:
+    if info.file_size <= 0 or info.file_size > 4096:
+        raise ReleaseError(f"ZIP contém link com destino inválido: {info.filename!r}")
+    raw = archive.read(info)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReleaseError(
+            f"ZIP contém link com destino não UTF-8: {info.filename!r}"
+        ) from exc
 
 
 def list_asset_members(path: Path) -> list[tuple[str, int]]:
@@ -512,10 +593,18 @@ def list_asset_members(path: Path) -> list[tuple[str, int]]:
         with tarfile.open(path, "r:gz") as archive:
             for member in archive.getmembers():
                 _validate_archive_member(member.name)
-                if member.issym() or member.islnk() or member.isdev():
-                    raise ReleaseError(f"TAR contém link ou tipo especial: {member.name!r}")
-                if member.isfile():
+                if member.isdev():
+                    raise ReleaseError(f"TAR contém dispositivo ou FIFO: {member.name!r}")
+                if member.issym():
+                    _resolve_safe_link(member.name, member.linkname)
+                    members.append((member.name.rstrip("/"), 0))
+                elif member.islnk():
+                    _resolve_safe_link(member.name, member.linkname, hardlink=True)
+                    members.append((member.name.rstrip("/"), 0))
+                elif member.isfile():
                     members.append((member.name.rstrip("/"), int(member.size or 0)))
+                elif not member.isdir():
+                    raise ReleaseError(f"TAR contém tipo especial: {member.name!r}")
     else:
         with zipfile.ZipFile(path) as archive:
             bad = archive.testzip()
@@ -525,8 +614,12 @@ def list_asset_members(path: Path) -> list[tuple[str, int]]:
                 _validate_archive_member(info.filename)
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat.S_IFLNK:
-                    raise ReleaseError(f"ZIP contém link simbólico: {info.filename!r}")
-                if not info.is_dir():
+                    target = _zip_symlink_target(archive, info)
+                    _resolve_safe_link(info.filename, target)
+                    members.append((info.filename.rstrip("/"), 0))
+                elif mode not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    raise ReleaseError(f"ZIP contém tipo especial: {info.filename!r}")
+                elif not info.is_dir():
                     members.append((info.filename.rstrip("/"), int(info.file_size or 0)))
     return members
 
