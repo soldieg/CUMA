@@ -130,16 +130,20 @@ jobs:
           CI: "true"
           CUMA_SKIP_MANIFEST: "1"
         run: call "compilacao\Windows\criar_windows.bat"
-      - name: Validar pacote Windows
+      - name: Preparar e validar artifact Windows
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force "release-artifact/windows" | Out-Null
+          Copy-Item -LiteralPath "ZIP final/Windows/CUMA_windows.zip" `
+            -Destination "release-artifact/windows/CUMA_windows.zip" -Force
           python scripts/release_pipeline.py verify-asset `
             --platform windows `
-            --path "ZIP final/Windows/CUMA_windows.zip"
+            --path "release-artifact/windows/CUMA_windows.zip" `
+            --output "release-artifact/windows/CUMA_windows.asset.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CUMA_windows
-          path: "ZIP final/Windows/CUMA_windows.zip"
+          path: "release-artifact/windows/*"
           if-no-files-found: error
           retention-days: 14
 
@@ -167,16 +171,20 @@ jobs:
         run: |
           chmod +x "compilacao/Linux/criar_linux_tar.sh"
           "compilacao/Linux/criar_linux_tar.sh"
-      - name: Validar pacote Linux
+      - name: Preparar e validar artifact Linux
         shell: bash
         run: |
+          mkdir -p release-artifact/linux
+          cp "ZIP final/Linux/CUMA_linux.tar.gz" \
+            "release-artifact/linux/CUMA_linux.tar.gz"
           python scripts/release_pipeline.py verify-asset \
             --platform linux \
-            --path "ZIP final/Linux/CUMA_linux.tar.gz"
+            --path "release-artifact/linux/CUMA_linux.tar.gz" \
+            --output "release-artifact/linux/CUMA_linux.asset.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CUMA_linux
-          path: "ZIP final/Linux/CUMA_linux.tar.gz"
+          path: "release-artifact/linux/*"
           if-no-files-found: error
           retention-days: 14
 
@@ -199,16 +207,20 @@ jobs:
         run: |
           chmod +x "compilacao/macOS/criar_macos_zip.sh"
           "compilacao/macOS/criar_macos_zip.sh"
-      - name: Validar pacote macOS
+      - name: Preparar e validar artifact macOS
         shell: bash
         run: |
+          mkdir -p release-artifact/macos
+          cp "ZIP final/macOS/CUMA_macos.zip" \
+            "release-artifact/macos/CUMA_macos.zip"
           python scripts/release_pipeline.py verify-asset \
             --platform macos \
-            --path "ZIP final/macOS/CUMA_macos.zip"
+            --path "release-artifact/macos/CUMA_macos.zip" \
+            --output "release-artifact/macos/CUMA_macos.asset.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: CUMA_macos
-          path: "ZIP final/macOS/CUMA_macos.zip"
+          path: "release-artifact/macos/*"
           if-no-files-found: error
           retention-days: 14
 
@@ -235,17 +247,22 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CUMA_windows
-          path: release-assets
+          path: release-assets/windows
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CUMA_linux
-          path: release-assets
+          path: release-assets/linux
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: CUMA_macos
-          path: release-assets
+          path: release-assets/macos
+
+      - name: Diagnosticar artifacts baixados
+        shell: bash
+        run: |
+          find release-assets -maxdepth 3 -type f -printf '%p | %s bytes\n' | sort
 
       - name: Consolidar hashes e stable.json
         shell: bash
@@ -283,9 +300,9 @@ jobs:
           fi
 
           gh release upload "$RELEASE_TAG" \
-            release-assets/CUMA_windows.zip \
-            release-assets/CUMA_linux.tar.gz \
-            release-assets/CUMA_macos.zip \
+            release-assets/windows/CUMA_windows.zip \
+            release-assets/linux/CUMA_linux.tar.gz \
+            release-assets/macos/CUMA_macos.zip \
             release-assets/SHA256SUMS.txt \
             "$RUNNER_TEMP/stable.json" \
             --clobber

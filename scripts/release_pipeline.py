@@ -33,18 +33,21 @@ PLATFORMS = {
         "archive_type": "zip",
         "main_exe_name": "cuma.exe",
         "folder": "CUMA_windows",
+        "receipt_name": "CUMA_windows.asset.json",
     },
     "linux": {
         "asset_name": "CUMA_linux.tar.gz",
         "archive_type": "tar.gz",
         "main_exe_name": "cuma",
         "folder": "CUMA_linux",
+        "receipt_name": "CUMA_linux.asset.json",
     },
     "macos": {
         "asset_name": "CUMA_macos.zip",
         "archive_type": "zip",
         "main_exe_name": "cuma",
         "folder": "CUMA_macos",
+        "receipt_name": "CUMA_macos.asset.json",
     },
 }
 FORBIDDEN_PAYLOAD_PREFIXES = (
@@ -664,13 +667,81 @@ def verify_asset(args: argparse.Namespace) -> int:
 
 
 def find_asset(assets_dir: Path, name: str) -> Path:
+    """Localiza exatamente um arquivo pelo nome dentro da árvore de artifacts."""
     direct = assets_dir / name
     if direct.is_file():
         return direct
-    matches = list(assets_dir.rglob(name))
+    matches = sorted(path for path in assets_dir.rglob(name) if path.is_file())
     if len(matches) != 1:
-        raise ReleaseError(f"Esperado exatamente um {name} em {assets_dir}; encontrados {len(matches)}.")
+        found = ", ".join(str(path.relative_to(assets_dir)) for path in matches[:10])
+        detail = f" ({found})" if found else ""
+        raise ReleaseError(
+            f"Esperado exatamente um {name} em {assets_dir}; "
+            f"encontrados {len(matches)}{detail}."
+        )
     return matches[0]
+
+
+def validate_asset_receipt(
+    assets_dir: Path,
+    platform: str,
+    asset: Path,
+    defaults: dict[str, Any],
+) -> dict[str, Any]:
+    """Confirma que o artifact baixado é idêntico ao validado no runner nativo.
+
+    A inspeção estrutural completa ocorre no job de build da própria plataforma.
+    O job final roda em Linux e não deve reinterpretar novamente ZIPs/TARs
+    produzidos em Windows/macOS. Em vez disso, compara SHA-256 e tamanho com o
+    recibo assinado pelo fluxo do mesmo job.
+    """
+    receipt_path = find_asset(assets_dir, str(defaults["receipt_name"]))
+    receipt = read_json(receipt_path)
+
+    expected_fields = {
+        "platform": platform,
+        "asset_name": defaults["asset_name"],
+    }
+    for field, expected in expected_fields.items():
+        actual = receipt.get(field)
+        if actual != expected:
+            raise ReleaseError(
+                f"Recibo inválido para {platform}: {field}={actual!r}; "
+                f"esperado {expected!r}."
+            )
+
+    try:
+        receipt_size = int(receipt.get("size_bytes"))
+        receipt_members = int(receipt.get("members"))
+    except (TypeError, ValueError) as exc:
+        raise ReleaseError(f"Recibo inválido para {platform}: tamanho/membros inválidos.") from exc
+
+    receipt_sha = str(receipt.get("sha256") or "").strip().upper()
+    if not re.fullmatch(r"[0-9A-F]{64}", receipt_sha):
+        raise ReleaseError(f"Recibo inválido para {platform}: SHA-256 ausente ou inválido.")
+    if receipt_size <= 0 or receipt_members <= 0:
+        raise ReleaseError(f"Recibo inválido para {platform}: pacote vazio.")
+
+    actual_size = asset.stat().st_size
+    actual_sha = sha256_file(asset)
+    if actual_size != receipt_size:
+        raise ReleaseError(
+            f"Artifact {asset.name} mudou após a validação: "
+            f"tamanho {actual_size}, esperado {receipt_size}."
+        )
+    if actual_sha != receipt_sha:
+        raise ReleaseError(
+            f"Artifact {asset.name} mudou após a validação: SHA-256 divergente."
+        )
+
+    return {
+        "platform": platform,
+        "asset_name": asset.name,
+        "size_bytes": actual_size,
+        "sha256": actual_sha,
+        "members": receipt_members,
+        "receipt": receipt_path.relative_to(assets_dir).as_posix(),
+    }
 
 
 def manifest(args: argparse.Namespace) -> int:
@@ -700,14 +771,13 @@ def manifest(args: argparse.Namespace) -> int:
     sums: list[str] = []
     for platform, defaults in PLATFORMS.items():
         asset = find_asset(assets_dir, defaults["asset_name"])
-        verify_namespace = argparse.Namespace(platform=platform, path=str(asset), output="")
-        verify_asset(verify_namespace)
-        sha = sha256_file(asset)
+        receipt = validate_asset_receipt(assets_dir, platform, asset, defaults)
+        sha = receipt["sha256"]
         platforms[platform] = {
             "asset_name": asset.name,
             "download_url": f"{base_url}/{asset.name}",
             "sha256": sha,
-            "size_bytes": asset.stat().st_size,
+            "size_bytes": receipt["size_bytes"],
             "archive_type": defaults["archive_type"],
             "main_exe_name": defaults["main_exe_name"],
         }
