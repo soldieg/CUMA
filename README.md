@@ -39,7 +39,7 @@ Não sou programador, mas entendo um pouco da logica de programação. Criei est
 - Conversão imagem → PDF, EPUB ou XTCH.
 - Criação de PDF a partir de imagens.
 - Temas visuais, incluindo temas CUMA baseados no ícone.
-- Criação automatica e edição de METADADOS des de paginas, capitulos, capa e infos dos arquivos
+- Criação automatica e edição de METADADOS de paginas, capitulos, capa e infos dos arquivos
 
 ## Download
 
